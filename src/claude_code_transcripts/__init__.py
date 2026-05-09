@@ -1608,6 +1608,9 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
     selected_project = questionary.select(
         "Select a project:",
         choices=project_choices,
+        use_search_filter=True,
+        use_jk_keys=False,
+        show_selected=True,
     ).ask()
 
     if selected_project is None:
@@ -1635,6 +1638,9 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
     selected = questionary.select(
         "Select a session:",
         choices=session_choices,
+        use_search_filter=True,
+        use_jk_keys=False,
+        show_selected=True,
     ).ask()
 
     if selected is None:

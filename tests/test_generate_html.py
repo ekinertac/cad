@@ -1428,14 +1428,19 @@ class TestFindLocalProjects:
         assert len(results) == 1
 
 
-def _make_mock_select(returns):
+def _make_mock_select(returns, calls=None):
     """Build a questionary.select stand-in that returns the next value from
-    `returns` on each .ask() call. Used to script the two-step picker."""
+    `returns` on each .ask() call. Used to script the two-step picker.
+
+    If `calls` (a list) is passed, each invocation appends its kwargs to it
+    so tests can assert what was passed to questionary.select.
+    """
     queue = list(returns)
 
     class MockSelect:
         def __init__(self, *args, **kwargs):
-            pass
+            if calls is not None:
+                calls.append(kwargs)
 
         def ask(self):
             return queue.pop(0)
@@ -1559,6 +1564,38 @@ class TestLocalSessionCLI:
 
         assert result.exit_code == 0
         assert "No session selected" in result.output
+
+    def test_local_pickers_have_search_filter_enabled(self, tmp_path, monkeypatch):
+        """Both pickers must pass use_search_filter=True so users can type to
+        narrow a long list. Pinning this in a test prevents accidental
+        regression if the questionary call sites are ever refactored."""
+        from click.testing import CliRunner
+        from claude_code_transcripts import cli
+        import questionary
+
+        project_dir = tmp_path / ".claude" / "projects" / "test-project"
+        project_dir.mkdir(parents=True)
+
+        session_file = project_dir / "session-123.jsonl"
+        session_file.write_text(
+            '{"type":"summary","summary":"Test session"}\n'
+            '{"type":"user","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}\n'
+        )
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        calls = []
+        monkeypatch.setattr(
+            questionary,
+            "select",
+            _make_mock_select([project_dir, session_file], calls=calls),
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["local"])
+
+        assert result.exit_code == 0
+        assert len(calls) == 2, "expected two questionary.select calls"
+        assert all(c.get("use_search_filter") is True for c in calls)
 
 
 class TestOutputAutoOption:
