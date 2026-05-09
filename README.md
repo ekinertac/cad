@@ -62,7 +62,7 @@ The generated output includes:
 
 ### Local sessions
 
-Local Claude Code sessions are stored as JSONL files in `~/.claude/projects`. Run with no arguments to select from recent sessions:
+Local Claude Code sessions are stored as JSONL files in `~/.claude/projects`. Run with no arguments to launch a two-step picker — first choose a project folder, then a session within it:
 
 ```bash
 claude-code-transcripts
@@ -70,11 +70,7 @@ claude-code-transcripts
 claude-code-transcripts local
 ```
 
-Use `--limit` to control how many sessions are shown (default: 10):
-
-```bash
-claude-code-transcripts local --limit 20
-```
+The first picker lists every project folder under `~/.claude/projects`, sorted by most recent activity, with each project's session count. Once you pick a project, every session in it is shown (newest first), so older sessions stay reachable.
 
 ### Web sessions
 

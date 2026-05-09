@@ -163,6 +163,9 @@ def find_local_sessions(folder, limit=10):
 
     Returns a list of (Path, summary) tuples sorted by modification time.
     Excludes agent files and warmup/empty sessions.
+
+    Pass ``limit=None`` to return every matching session uncapped — used by
+    the two-step ``local`` picker once a project has been chosen.
     """
     folder = Path(folder)
     if not folder.exists():
@@ -181,6 +184,72 @@ def find_local_sessions(folder, limit=10):
     # Sort by modification time, most recent first
     results.sort(key=lambda x: x[0].stat().st_mtime, reverse=True)
     return results[:limit]
+
+
+def find_local_projects(folder):
+    """Discover top-level project folders under ``folder`` for the two-step
+    picker. Reads only filesystem metadata — never opens session files — so
+    the project picker stays cheap regardless of how many sessions exist.
+
+    Returns a list of dicts sorted by ``latest_mtime`` descending::
+
+        {
+            "name":         "foo",                       # display name via get_project_display_name
+            "raw_name":     "-Users-x-Code-foo",         # unmodified folder name
+            "path":         Path(...),                   # the project folder
+            "session_count": 3,                          # JSONLs excluding agent-*
+            "latest_mtime": 1700000000.0,
+            "display":      "foo                  2026-05-10 14:02   3 sessions",
+        }
+
+    Folders with zero non-agent JSONL files are skipped. When two projects
+    collapse to the same display name, both rows get a trailing
+    ``  (raw_name)`` disambiguator so the user can tell them apart.
+    """
+    folder = Path(folder)
+    if not folder.exists():
+        return []
+
+    projects = []
+    for child in folder.iterdir():
+        if not child.is_dir():
+            continue
+        try:
+            jsonls = [
+                f for f in child.glob("*.jsonl") if not f.name.startswith("agent-")
+            ]
+        except OSError:
+            # Unreadable folder — skip silently, matching find_local_sessions
+            continue
+        if not jsonls:
+            continue
+        latest_mtime = max(f.stat().st_mtime for f in jsonls)
+        projects.append(
+            {
+                "name": get_project_display_name(child.name),
+                "raw_name": child.name,
+                "path": child,
+                "session_count": len(jsonls),
+                "latest_mtime": latest_mtime,
+            }
+        )
+
+    projects.sort(key=lambda p: p["latest_mtime"], reverse=True)
+
+    # Detect display-name collisions so we can disambiguate just those rows
+    name_counts = {}
+    for p in projects:
+        name_counts[p["name"]] = name_counts.get(p["name"], 0) + 1
+
+    for p in projects:
+        date_str = datetime.fromtimestamp(p["latest_mtime"]).strftime("%Y-%m-%d %H:%M")
+        plural = "session" if p["session_count"] == 1 else "sessions"
+        line = f"{p['name']:<30} {date_str}   {p['session_count']} {plural}"
+        if name_counts[p["name"]] > 1:
+            line = f"{line}   ({p['raw_name']})"
+        p["display"] = line
+
+    return projects
 
 
 def get_project_display_name(folder_name):
@@ -1511,13 +1580,14 @@ def cli():
     is_flag=True,
     help="Open the generated index.html in your default browser (default if no -o specified).",
 )
-@click.option(
-    "--limit",
-    default=10,
-    help="Maximum number of sessions to show (default: 10)",
-)
-def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit):
-    """Select and convert a local Claude Code session to HTML."""
+def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
+    """Select and convert a local Claude Code session to HTML.
+
+    The picker is two-step: first choose a project folder under
+    ~/.claude/projects, then choose a session within it. Project metadata
+    is gathered without reading session summaries so the first picker is
+    cheap even with hundreds of sessions on disk.
+    """
     projects_folder = Path.home() / ".claude" / "projects"
 
     if not projects_folder.exists():
@@ -1525,29 +1595,46 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser, limit
         click.echo("No local Claude Code sessions available.")
         return
 
-    click.echo("Loading local sessions...")
-    results = find_local_sessions(projects_folder, limit=limit)
+    click.echo("Loading projects...")
+    projects = find_local_projects(projects_folder)
 
-    if not results:
-        click.echo("No local sessions found.")
+    if not projects:
+        click.echo("No local projects found.")
         return
 
-    # Build choices for questionary
-    choices = []
+    project_choices = [
+        questionary.Choice(title=p["display"], value=p["path"]) for p in projects
+    ]
+    selected_project = questionary.select(
+        "Select a project:",
+        choices=project_choices,
+    ).ask()
+
+    if selected_project is None:
+        click.echo("No project selected.")
+        return
+
+    # Read summaries only for the chosen project — the speed win.
+    results = find_local_sessions(selected_project, limit=None)
+
+    if not results:
+        click.echo(f"No sessions in {selected_project.name}.")
+        return
+
+    session_choices = []
     for filepath, summary in results:
         stat = filepath.stat()
         mod_time = datetime.fromtimestamp(stat.st_mtime)
         size_kb = stat.st_size / 1024
         date_str = mod_time.strftime("%Y-%m-%d %H:%M")
-        # Truncate summary if too long
         if len(summary) > 50:
             summary = summary[:47] + "..."
         display = f"{date_str}  {size_kb:5.0f} KB  {summary}"
-        choices.append(questionary.Choice(title=display, value=filepath))
+        session_choices.append(questionary.Choice(title=display, value=filepath))
 
     selected = questionary.select(
-        "Select a session to convert:",
-        choices=choices,
+        "Select a session:",
+        choices=session_choices,
     ).ask()
 
     if selected is None:

@@ -27,6 +27,7 @@ from claude_code_transcripts import (
     parse_session_file,
     get_session_summary,
     find_local_sessions,
+    find_local_projects,
 )
 
 
@@ -1279,6 +1280,168 @@ class TestFindLocalSessions:
         results = find_local_sessions(tmp_path / ".claude" / "projects", limit=3)
         assert len(results) == 3
 
+    def test_limit_none_returns_all(self, tmp_path):
+        """limit=None means no cap — every session is returned."""
+        projects_dir = tmp_path / ".claude" / "projects" / "test-project"
+        projects_dir.mkdir(parents=True)
+
+        for i in range(15):
+            f = projects_dir / f"session-{i}.jsonl"
+            f.write_text(
+                f'{{"type":"summary","summary":"Session {i}"}}\n{{"type":"user","timestamp":"2025-01-01T00:00:00Z","message":{{"role":"user","content":"test"}}}}\n'
+            )
+
+        results = find_local_sessions(tmp_path / ".claude" / "projects", limit=None)
+        assert len(results) == 15
+
+
+def _write_session(folder, name, summary="Session"):
+    """Helper: write a minimal valid session JSONL into folder."""
+    f = folder / name
+    f.write_text(
+        f'{{"type":"summary","summary":"{summary}"}}\n'
+        '{"type":"user","timestamp":"2025-01-01T00:00:00Z",'
+        '"message":{"role":"user","content":"test"}}\n'
+    )
+    return f
+
+
+class TestFindLocalProjects:
+    """Tests for find_local_projects which discovers project folders without
+    reading session summaries (the speed win behind the two-step picker)."""
+
+    def test_returns_empty_for_missing_folder(self, tmp_path):
+        assert find_local_projects(tmp_path / "does-not-exist") == []
+
+    def test_returns_empty_for_empty_folder(self, tmp_path):
+        projects_dir = tmp_path / ".claude" / "projects"
+        projects_dir.mkdir(parents=True)
+        assert find_local_projects(projects_dir) == []
+
+    def test_skips_folders_with_no_jsonl(self, tmp_path):
+        projects_dir = tmp_path / ".claude" / "projects"
+        proj = projects_dir / "-Users-x-Code-foo"
+        proj.mkdir(parents=True)
+        (proj / "readme.txt").write_text("nope")
+        assert find_local_projects(projects_dir) == []
+
+    def test_skips_folders_with_only_agent_files(self, tmp_path):
+        projects_dir = tmp_path / ".claude" / "projects"
+        proj = projects_dir / "-Users-x-Code-foo"
+        proj.mkdir(parents=True)
+        _write_session(proj, "agent-123.jsonl")
+        assert find_local_projects(projects_dir) == []
+
+    def test_counts_sessions_correctly(self, tmp_path):
+        projects_dir = tmp_path / ".claude" / "projects"
+        proj = projects_dir / "-Users-x-Code-foo"
+        proj.mkdir(parents=True)
+        _write_session(proj, "a.jsonl")
+        _write_session(proj, "b.jsonl")
+        _write_session(proj, "c.jsonl")
+        _write_session(proj, "agent-skip.jsonl")  # excluded
+        results = find_local_projects(projects_dir)
+        assert len(results) == 1
+        assert results[0]["session_count"] == 3
+
+    def test_latest_mtime_is_max_session_mtime(self, tmp_path):
+        import os
+
+        projects_dir = tmp_path / ".claude" / "projects"
+        proj = projects_dir / "-Users-x-Code-foo"
+        proj.mkdir(parents=True)
+        old = _write_session(proj, "old.jsonl")
+        new = _write_session(proj, "new.jsonl")
+        os.utime(old, (1_000_000, 1_000_000))
+        os.utime(new, (2_000_000, 2_000_000))
+
+        results = find_local_projects(projects_dir)
+        assert len(results) == 1
+        assert results[0]["latest_mtime"] == 2_000_000
+
+    def test_sorted_by_latest_mtime_desc(self, tmp_path):
+        import os
+
+        projects_dir = tmp_path / ".claude" / "projects"
+        a = projects_dir / "-Users-x-Code-aaa"
+        b = projects_dir / "-Users-x-Code-bbb"
+        c = projects_dir / "-Users-x-Code-ccc"
+        for p in (a, b, c):
+            p.mkdir(parents=True)
+        os.utime(_write_session(a, "s.jsonl"), (1_000_000, 1_000_000))
+        os.utime(_write_session(b, "s.jsonl"), (3_000_000, 3_000_000))
+        os.utime(_write_session(c, "s.jsonl"), (2_000_000, 2_000_000))
+
+        results = find_local_projects(projects_dir)
+        assert [r["raw_name"] for r in results] == [
+            "-Users-x-Code-bbb",
+            "-Users-x-Code-ccc",
+            "-Users-x-Code-aaa",
+        ]
+
+    def test_display_name_uses_helper(self, tmp_path):
+        projects_dir = tmp_path / ".claude" / "projects"
+        proj = projects_dir / "-Users-x-Code-foo"
+        proj.mkdir(parents=True)
+        _write_session(proj, "s.jsonl")
+        results = find_local_projects(projects_dir)
+        assert results[0]["name"] == "foo"
+
+    def test_collision_appends_disambiguator(self, tmp_path):
+        """Two folders that collapse to the same display name get the raw
+        folder appended; a third, unique folder stays clean."""
+        projects_dir = tmp_path / ".claude" / "projects"
+        # Both of these reduce to the same display name via
+        # get_project_display_name (intermediate dirs stripped).
+        a = projects_dir / "-Users-x-Code-foo"
+        b = projects_dir / "-Users-x-projects-foo"
+        c = projects_dir / "-Users-x-Code-unique"
+        for p in (a, b, c):
+            p.mkdir(parents=True)
+            _write_session(p, "s.jsonl")
+
+        results = find_local_projects(projects_dir)
+        by_raw = {r["raw_name"]: r for r in results}
+
+        # Both colliders carry the disambiguator suffix in their display string
+        assert "(-Users-x-Code-foo)" in by_raw["-Users-x-Code-foo"]["display"]
+        assert "(-Users-x-projects-foo)" in by_raw["-Users-x-projects-foo"]["display"]
+        # Non-colliding row stays clean
+        assert "(" not in by_raw["-Users-x-Code-unique"]["display"]
+
+    def test_does_not_read_session_summaries(self, tmp_path, monkeypatch):
+        """find_local_projects must not call get_session_summary — the whole
+        point is to keep the project picker cheap."""
+        import claude_code_transcripts
+
+        projects_dir = tmp_path / ".claude" / "projects"
+        proj = projects_dir / "-Users-x-Code-foo"
+        proj.mkdir(parents=True)
+        _write_session(proj, "s.jsonl")
+
+        def boom(*a, **kw):
+            raise AssertionError("get_session_summary should not be called")
+
+        monkeypatch.setattr(claude_code_transcripts, "get_session_summary", boom)
+        # Should not raise
+        results = find_local_projects(projects_dir)
+        assert len(results) == 1
+
+
+def _make_mock_select(returns):
+    """Build a questionary.select stand-in that returns the next value from
+    `returns` on each .ask() call. Used to script the two-step picker."""
+    queue = list(returns)
+
+    class MockSelect:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def ask(self):
+            return queue.pop(0)
+
+    return MockSelect
+
 
 class TestLocalSessionCLI:
     """Tests for CLI behavior with local sessions."""
@@ -1290,10 +1453,10 @@ class TestLocalSessionCLI:
         import questionary
 
         # Create mock .claude/projects structure
-        projects_dir = tmp_path / ".claude" / "projects" / "test-project"
-        projects_dir.mkdir(parents=True)
+        project_dir = tmp_path / ".claude" / "projects" / "test-project"
+        project_dir.mkdir(parents=True)
 
-        session_file = projects_dir / "session-123.jsonl"
+        session_file = project_dir / "session-123.jsonl"
         session_file.write_text(
             '{"type":"summary","summary":"Test local session"}\n'
             '{"type":"user","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}\n'
@@ -1302,21 +1465,18 @@ class TestLocalSessionCLI:
         # Mock Path.home() to return our tmp_path
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
-        # Mock questionary.select to return the session file
-        class MockSelect:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def ask(self):
-                return session_file
-
-        monkeypatch.setattr(questionary, "select", MockSelect)
+        # Two-step picker: first pick project, then session
+        monkeypatch.setattr(
+            questionary,
+            "select",
+            _make_mock_select([project_dir, session_file]),
+        )
 
         runner = CliRunner()
         result = runner.invoke(cli, ["local"])
 
         assert result.exit_code == 0
-        assert "Loading local sessions" in result.output
+        assert "Loading projects" in result.output
         assert "Generated" in result.output
 
     def test_no_args_runs_local_command(self, tmp_path, monkeypatch):
@@ -1326,62 +1486,73 @@ class TestLocalSessionCLI:
         import questionary
 
         # Create mock .claude/projects structure
-        projects_dir = tmp_path / ".claude" / "projects" / "test-project"
-        projects_dir.mkdir(parents=True)
+        project_dir = tmp_path / ".claude" / "projects" / "test-project"
+        project_dir.mkdir(parents=True)
 
-        session_file = projects_dir / "session-123.jsonl"
+        session_file = project_dir / "session-123.jsonl"
         session_file.write_text(
             '{"type":"summary","summary":"Test default session"}\n'
             '{"type":"user","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}\n'
         )
 
-        # Mock Path.home() to return our tmp_path
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-
-        # Mock questionary.select to return the session file
-        class MockSelect:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def ask(self):
-                return session_file
-
-        monkeypatch.setattr(questionary, "select", MockSelect)
+        monkeypatch.setattr(
+            questionary,
+            "select",
+            _make_mock_select([project_dir, session_file]),
+        )
 
         runner = CliRunner()
         result = runner.invoke(cli, [])
 
         assert result.exit_code == 0
-        assert "Loading local sessions" in result.output
+        assert "Loading projects" in result.output
 
-    def test_local_handles_cancelled_selection(self, tmp_path, monkeypatch):
-        """Test that local command handles cancelled selection gracefully."""
+    def test_local_handles_cancelled_project_selection(self, tmp_path, monkeypatch):
+        """Cancelling at the project picker exits with a friendly message."""
         from click.testing import CliRunner
         from claude_code_transcripts import cli
         import questionary
 
-        # Create mock .claude/projects structure
-        projects_dir = tmp_path / ".claude" / "projects" / "test-project"
-        projects_dir.mkdir(parents=True)
+        project_dir = tmp_path / ".claude" / "projects" / "test-project"
+        project_dir.mkdir(parents=True)
 
-        session_file = projects_dir / "session-123.jsonl"
+        session_file = project_dir / "session-123.jsonl"
         session_file.write_text(
             '{"type":"summary","summary":"Test session"}\n'
             '{"type":"user","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}\n'
         )
 
-        # Mock Path.home() to return our tmp_path
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(questionary, "select", _make_mock_select([None]))
 
-        # Mock questionary.select to return None (cancelled)
-        class MockSelect:
-            def __init__(self, *args, **kwargs):
-                pass
+        runner = CliRunner()
+        result = runner.invoke(cli, ["local"])
 
-            def ask(self):
-                return None
+        assert result.exit_code == 0
+        assert "No project selected" in result.output
 
-        monkeypatch.setattr(questionary, "select", MockSelect)
+    def test_local_handles_cancelled_session_selection(self, tmp_path, monkeypatch):
+        """Cancelling at the session picker exits with the existing message."""
+        from click.testing import CliRunner
+        from claude_code_transcripts import cli
+        import questionary
+
+        project_dir = tmp_path / ".claude" / "projects" / "test-project"
+        project_dir.mkdir(parents=True)
+
+        session_file = project_dir / "session-123.jsonl"
+        session_file.write_text(
+            '{"type":"summary","summary":"Test session"}\n'
+            '{"type":"user","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}\n'
+        )
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(
+            questionary,
+            "select",
+            _make_mock_select([project_dir, None]),
+        )
 
         runner = CliRunner()
         result = runner.invoke(cli, ["local"])
@@ -1467,10 +1638,10 @@ class TestOutputAutoOption:
         import questionary
 
         # Create mock .claude/projects structure
-        projects_dir = tmp_path / ".claude" / "projects" / "test-project"
-        projects_dir.mkdir(parents=True)
+        project_dir = tmp_path / ".claude" / "projects" / "test-project"
+        project_dir.mkdir(parents=True)
 
-        session_file = projects_dir / "my-session-file.jsonl"
+        session_file = project_dir / "my-session-file.jsonl"
         session_file.write_text(
             '{"type":"summary","summary":"Test local session"}\n'
             '{"type":"user","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}\n'
@@ -1479,18 +1650,13 @@ class TestOutputAutoOption:
         output_parent = tmp_path / "output"
         output_parent.mkdir()
 
-        # Mock Path.home() to return our tmp_path
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-
-        # Mock questionary.select to return the session file
-        class MockSelect:
-            def __init__(self, *args, **kwargs):
-                pass
-
-            def ask(self):
-                return session_file
-
-        monkeypatch.setattr(questionary, "select", MockSelect)
+        # Two-step picker: project, then session
+        monkeypatch.setattr(
+            questionary,
+            "select",
+            _make_mock_select([project_dir, session_file]),
+        )
 
         runner = CliRunner()
         result = runner.invoke(cli, ["local", "-a", "-o", str(output_parent)])
