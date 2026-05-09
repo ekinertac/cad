@@ -186,6 +186,16 @@ def find_local_sessions(folder, limit=10):
     return results[:limit]
 
 
+def _global_session_folder_names():
+    """Raw folder names that should merge into the virtual 'Global Sessions'
+    project. Currently the user's home dir and ~/Code — these are catch-all
+    locations for one-off questions, not real project folders. Computed from
+    Path.home() so the rule generalises across machines.
+    """
+    home_encoded = str(Path.home()).replace("/", "-")
+    return {home_encoded, f"{home_encoded}-Code"}
+
+
 def find_local_projects(folder):
     """Discover top-level project folders under ``folder`` for the two-step
     picker. Reads only filesystem metadata — never opens session files — so
@@ -195,14 +205,17 @@ def find_local_projects(folder):
 
         {
             "name":         "foo",                       # display name via get_project_display_name
-            "raw_name":     "-Users-x-Code-foo",         # unmodified folder name
-            "path":         Path(...),                   # the project folder
+            "raw_name":     "-Users-x-Code-foo",         # unmodified folder name (None for virtual)
+            "path":         Path(...),                   # the project folder (None for virtual)
+            "paths":        [Path(...), ...],            # always populated; multi-element for virtual
             "session_count": 3,                          # JSONLs excluding agent-*
             "latest_mtime": 1700000000.0,
             "display":      "foo                  2026-05-10 14:02   3 sessions",
         }
 
-    Folders with zero non-agent JSONL files are skipped. When two projects
+    Folders matching :func:`_global_session_folder_names` (home and ~/Code)
+    do not appear as separate entries — their sessions are aggregated under
+    a single virtual project named "Global Sessions". When two real projects
     collapse to the same display name, both rows get a trailing
     ``  (raw_name)`` disambiguator so the user can tell them apart.
     """
@@ -210,7 +223,12 @@ def find_local_projects(folder):
     if not folder.exists():
         return []
 
+    global_names = _global_session_folder_names()
     projects = []
+    global_paths = []
+    global_total_sessions = 0
+    global_latest_mtime = 0.0
+
     for child in folder.iterdir():
         if not child.is_dir():
             continue
@@ -224,13 +242,33 @@ def find_local_projects(folder):
         if not jsonls:
             continue
         latest_mtime = max(f.stat().st_mtime for f in jsonls)
+
+        if child.name in global_names:
+            global_paths.append(child)
+            global_total_sessions += len(jsonls)
+            global_latest_mtime = max(global_latest_mtime, latest_mtime)
+            continue
+
         projects.append(
             {
                 "name": get_project_display_name(child.name),
                 "raw_name": child.name,
                 "path": child,
+                "paths": [child],
                 "session_count": len(jsonls),
                 "latest_mtime": latest_mtime,
+            }
+        )
+
+    if global_paths:
+        projects.append(
+            {
+                "name": "Global Sessions",
+                "raw_name": None,
+                "path": None,
+                "paths": global_paths,
+                "session_count": global_total_sessions,
+                "latest_mtime": global_latest_mtime,
             }
         )
 
@@ -245,7 +283,8 @@ def find_local_projects(folder):
         date_str = datetime.fromtimestamp(p["latest_mtime"]).strftime("%Y-%m-%d %H:%M")
         plural = "session" if p["session_count"] == 1 else "sessions"
         line = f"{p['name']:<30} {date_str}   {p['session_count']} {plural}"
-        if name_counts[p["name"]] > 1:
+        # Virtual project never collides (unique name) and has no raw_name to show.
+        if name_counts[p["name"]] > 1 and p["raw_name"] is not None:
             line = f"{line}   ({p['raw_name']})"
         p["display"] = line
 
@@ -1603,7 +1642,7 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
         return
 
     project_choices = [
-        questionary.Choice(title=p["display"], value=p["path"]) for p in projects
+        questionary.Choice(title=p["display"], value=p) for p in projects
     ]
     selected_project = questionary.select(
         "Select a project:",
@@ -1618,10 +1657,15 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
         return
 
     # Read summaries only for the chosen project — the speed win.
-    results = find_local_sessions(selected_project, limit=None)
+    # `paths` is always a list (single-element for real projects, multi-element
+    # for the virtual "Global Sessions" entry that merges ~/ and ~/Code).
+    results = []
+    for path in selected_project["paths"]:
+        results.extend(find_local_sessions(path, limit=None))
+    results.sort(key=lambda x: x[0].stat().st_mtime, reverse=True)
 
     if not results:
-        click.echo(f"No sessions in {selected_project.name}.")
+        click.echo(f"No sessions in {selected_project['name']}.")
         return
 
     session_choices = []

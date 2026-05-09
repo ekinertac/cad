@@ -1427,6 +1427,95 @@ class TestFindLocalProjects:
         results = find_local_projects(projects_dir)
         assert len(results) == 1
 
+    def test_real_projects_carry_paths_list(self, tmp_path):
+        """Every project entry exposes a paths list (single-element for real
+        projects). The session picker uses this uniformly across real and
+        virtual projects."""
+        projects_dir = tmp_path / ".claude" / "projects"
+        proj = projects_dir / "-Users-x-Code-foo"
+        proj.mkdir(parents=True)
+        _write_session(proj, "s.jsonl")
+
+        results = find_local_projects(projects_dir)
+        assert results[0]["paths"] == [proj]
+
+    def test_merges_home_and_home_code_into_global_sessions(
+        self, tmp_path, monkeypatch
+    ):
+        """The two folders the user uses for quick one-off questions
+        (~/ and ~/Code) merge into a single virtual 'Global Sessions' entry."""
+        monkeypatch.setattr(Path, "home", lambda: Path("/Users/x"))
+
+        projects_dir = tmp_path / ".claude" / "projects"
+        home_folder = projects_dir / "-Users-x"
+        code_folder = projects_dir / "-Users-x-Code"
+        for p in (home_folder, code_folder):
+            p.mkdir(parents=True)
+        _write_session(home_folder, "a.jsonl")
+        _write_session(home_folder, "b.jsonl")
+        _write_session(code_folder, "c.jsonl")
+
+        results = find_local_projects(projects_dir)
+        # Exactly one virtual entry — neither raw folder appears separately.
+        assert len(results) == 1
+        global_entry = results[0]
+        assert global_entry["name"] == "Global Sessions"
+        assert global_entry["session_count"] == 3
+        assert sorted(global_entry["paths"]) == sorted([home_folder, code_folder])
+
+    def test_only_home_present_still_produces_global_sessions(
+        self, tmp_path, monkeypatch
+    ):
+        """If only one of the two global folders exists, the virtual entry
+        still represents it (no need to require both)."""
+        monkeypatch.setattr(Path, "home", lambda: Path("/Users/x"))
+
+        projects_dir = tmp_path / ".claude" / "projects"
+        home_folder = projects_dir / "-Users-x"
+        home_folder.mkdir(parents=True)
+        _write_session(home_folder, "a.jsonl")
+
+        results = find_local_projects(projects_dir)
+        assert len(results) == 1
+        assert results[0]["name"] == "Global Sessions"
+        assert results[0]["paths"] == [home_folder]
+
+    def test_global_sessions_does_not_swallow_real_projects(
+        self, tmp_path, monkeypatch
+    ):
+        """A real project under ~/Code (e.g. ~/Code/foo) keeps its own entry —
+        only the bare ~/ and ~/Code folders are merged."""
+        monkeypatch.setattr(Path, "home", lambda: Path("/Users/x"))
+
+        projects_dir = tmp_path / ".claude" / "projects"
+        home_folder = projects_dir / "-Users-x"
+        code_folder = projects_dir / "-Users-x-Code"
+        real_proj = projects_dir / "-Users-x-Code-claude-code-transcripts"
+        for p in (home_folder, code_folder, real_proj):
+            p.mkdir(parents=True)
+            _write_session(p, "s.jsonl")
+
+        results = find_local_projects(projects_dir)
+        names = [r["name"] for r in results]
+        assert "Global Sessions" in names
+        # The real project survives as a separate, non-virtual entry.
+        assert any(
+            r["paths"] == [real_proj] and r["name"] != "Global Sessions"
+            for r in results
+        )
+
+    def test_no_global_entry_when_no_global_folders(self, tmp_path, monkeypatch):
+        """If neither ~/ nor ~/Code has sessions, no virtual entry is added."""
+        monkeypatch.setattr(Path, "home", lambda: Path("/Users/x"))
+
+        projects_dir = tmp_path / ".claude" / "projects"
+        proj = projects_dir / "-Users-x-Code-foo"
+        proj.mkdir(parents=True)
+        _write_session(proj, "s.jsonl")
+
+        results = find_local_projects(projects_dir)
+        assert all(r["name"] != "Global Sessions" for r in results)
+
 
 def _make_mock_select(returns, calls=None):
     """Build a questionary.select stand-in that returns the next value from
@@ -1474,7 +1563,9 @@ class TestLocalSessionCLI:
         monkeypatch.setattr(
             questionary,
             "select",
-            _make_mock_select([project_dir, session_file]),
+            _make_mock_select(
+                [{"name": "test-project", "paths": [project_dir]}, session_file]
+            ),
         )
 
         runner = CliRunner()
@@ -1504,7 +1595,9 @@ class TestLocalSessionCLI:
         monkeypatch.setattr(
             questionary,
             "select",
-            _make_mock_select([project_dir, session_file]),
+            _make_mock_select(
+                [{"name": "test-project", "paths": [project_dir]}, session_file]
+            ),
         )
 
         runner = CliRunner()
@@ -1556,7 +1649,7 @@ class TestLocalSessionCLI:
         monkeypatch.setattr(
             questionary,
             "select",
-            _make_mock_select([project_dir, None]),
+            _make_mock_select([{"name": "test-project", "paths": [project_dir]}, None]),
         )
 
         runner = CliRunner()
@@ -1587,7 +1680,10 @@ class TestLocalSessionCLI:
         monkeypatch.setattr(
             questionary,
             "select",
-            _make_mock_select([project_dir, session_file], calls=calls),
+            _make_mock_select(
+                [{"name": "test-project", "paths": [project_dir]}, session_file],
+                calls=calls,
+            ),
         )
 
         runner = CliRunner()
@@ -1692,7 +1788,9 @@ class TestOutputAutoOption:
         monkeypatch.setattr(
             questionary,
             "select",
-            _make_mock_select([project_dir, session_file]),
+            _make_mock_select(
+                [{"name": "test-project", "paths": [project_dir]}, session_file]
+            ),
         )
 
         runner = CliRunner()
