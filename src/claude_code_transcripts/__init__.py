@@ -597,51 +597,51 @@ def _extract_summarizable_text(event):
 
 
 def summarize_session(session):
-    """Call the Anthropic API to generate a short title for the session.
+    """Generate a short title for the session by piping an excerpt to the
+    locally-installed ``claude`` CLI in non-interactive (``-p``) mode.
 
-    Lazy-imports ``anthropic`` so the dependency only matters if you press
-    ``s``. Returns the new title string, or raises ``click.ClickException``
-    with a helpful message if the SDK isn't installed or the API call
-    fails. Uses Haiku — fast, cheap, plenty for a 3-6 word title.
+    Using the CLI instead of the Anthropic SDK is intentional: the CLI
+    uses the user's Claude Code subscription auth, so summarize works
+    even when their raw API credits are exhausted. Haiku is fast and
+    plenty for a 3-7 word title. Raises :class:`click.ClickException` on
+    timeout, missing binary, non-zero exit, or empty output.
     """
-    try:
-        import anthropic
-    except ImportError:
-        raise click.ClickException(
-            "Summarize needs the anthropic SDK: `uv pip install anthropic`."
-        )
-
     excerpt = _read_session_excerpt_for_summary(session)
     if not excerpt:
         raise click.ClickException("Could not read session content to summarize.")
 
-    try:
-        client = anthropic.Anthropic()
-        resp = client.messages.create(
-            model="claude-haiku-4-5",
-            max_tokens=60,
-            messages=[
-                {
-                    "role": "user",
-                    "content": (
-                        "Generate a concise 3-7 word title that captures what "
-                        "this coding session was about. Respond with the title "
-                        "only — no quotes, no trailing punctuation.\n\n"
-                        f"<session>\n{excerpt}\n</session>"
-                    ),
-                }
-            ],
-        )
-    except anthropic.AnthropicError as e:  # broad, but the SDK's base error
-        raise click.ClickException(f"Anthropic API error: {e}")
+    prompt = (
+        "Generate a concise 3-7 word title that captures what this coding "
+        "session was about. Respond with the title only — no quotes, no "
+        "trailing punctuation, no preamble.\n\n"
+        f"<session>\n{excerpt}\n</session>"
+    )
 
-    title = "".join(
-        b.text for b in resp.content if getattr(b, "type", None) == "text"
-    ).strip()
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "--model", "haiku"],
+            input=prompt,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except FileNotFoundError:
+        raise click.ClickException(
+            "`claude` not found on PATH — summarize uses it as the LLM."
+        )
+    except subprocess.TimeoutExpired:
+        raise click.ClickException("Summarize timed out after 60s.")
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        raise click.ClickException(
+            f"claude exited with code {result.returncode}: {stderr[:200]}"
+        )
+
     # Strip wrapping quotes the model sometimes adds despite the instruction.
-    title = title.strip("\"'").strip()
+    title = result.stdout.strip().strip("\"'").strip()
     if not title:
-        raise click.ClickException("Anthropic returned an empty title.")
+        raise click.ClickException("claude returned an empty title.")
     return title
 
 
