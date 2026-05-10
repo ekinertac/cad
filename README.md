@@ -79,6 +79,20 @@ On the session step:
 - **/** opens search-filter mode (type to filter, `Enter` confirms+resumes, `Esc` exits search).
 - **Esc** cancels.
 
+#### Stay in the project folder after claude exits
+
+A child process can't change its parent shell's working directory, so by default your shell returns to wherever you ran `cct` from once claude exits. To make Enter leave you inside the project directory, install the shell wrapper once:
+
+```bash
+# zsh
+eval "$(cct shell-init zsh)"  >> ~/.zshrc
+
+# bash
+eval "$(cct shell-init bash)" >> ~/.bashrc
+```
+
+Reload the shell after editing the rc file. The wrapper passes a temp file via `CCT_CWD_FILE`; `cct` writes the project path there before exec'ing claude, and the wrapper `cd`s your shell to it on exit.
+
 ### Web sessions
 
 Import sessions directly from the Claude API:

@@ -394,6 +394,12 @@ def resume_session(jsonl_path):
     --resume <session-id>`` after chdir'ing to the cwd recorded in the JSONL.
     Skip-permissions is intentional: permission prompts in long sessions
     devolve into rubber-stamping (alarm fatigue). Never returns on success.
+
+    A child process can't change its parent shell's working directory.
+    To make the shell end up in the project folder after claude exits,
+    the user installs the wrapper printed by ``cct shell-init``: it sets
+    ``CCT_CWD_FILE`` to a temp path; we write the target cwd there before
+    exec'ing claude, and the shell function reads it after exit and cd's.
     """
     cwd = get_session_cwd(jsonl_path)
     if cwd is None:
@@ -407,11 +413,55 @@ def resume_session(jsonl_path):
         sys.exit(1)
     session_id = jsonl_path.stem
     click.echo(f"Resuming {session_id} in {cwd}...")
+
+    # Pass cwd back to the parent shell via the wrapper's temp file (if any).
+    # Don't fail the resume if writing the breadcrumb fails — claude still
+    # runs; the user just won't get the post-exit cd.
+    cwd_file = os.environ.get("CCT_CWD_FILE")
+    if cwd_file:
+        try:
+            Path(cwd_file).write_text(cwd)
+        except OSError:
+            pass
+
     os.chdir(cwd)
     os.execvp(
         "claude",
         ["claude", "--dangerously-skip-permissions", "--resume", session_id],
     )
+
+
+# `command cct` in the wrapper skips this function so the binary runs once.
+# zsh and bash get separate snippets only because the conditional syntax
+# differs slightly; the mechanism is identical.
+SHELL_WRAPPERS = {
+    "zsh": """\
+cct() {
+  local cwd_file
+  cwd_file=$(mktemp -t cct-cwd.XXXXXX)
+  CCT_CWD_FILE="$cwd_file" command cct "$@"
+  local rc=$?
+  if [[ -s "$cwd_file" ]]; then
+    cd "$(< "$cwd_file")" || true
+  fi
+  rm -f "$cwd_file"
+  return $rc
+}
+""",
+    "bash": """\
+cct() {
+  local cwd_file
+  cwd_file=$(mktemp -t cct-cwd.XXXXXX)
+  CCT_CWD_FILE="$cwd_file" command cct "$@"
+  local rc=$?
+  if [ -s "$cwd_file" ]; then
+    cd "$(cat "$cwd_file")" || true
+  fi
+  rm -f "$cwd_file"
+  return $rc
+}
+""",
+}
 
 
 TEMP_OUTPUT_PARENT = "claude-code-transcripts"
@@ -1914,6 +1964,23 @@ def generate_html(json_path, output_dir, github_repo=None):
 def cli():
     """Convert Claude Code session JSON to mobile-friendly HTML pages."""
     pass
+
+
+@cli.command("shell-init")
+@click.argument("shell", type=click.Choice(sorted(SHELL_WRAPPERS.keys())))
+def shell_init_cmd(shell):
+    """Print a shell wrapper function for `cct`.
+
+    Install once by adding this line to your rc file::
+
+        eval "$(cct shell-init zsh)"   # or bash
+
+    The wrapper makes Enter (resume) leave your shell inside the project
+    directory after claude exits. Without it, you stay in whichever
+    directory you ran `cct` from — a Unix child process can't cd its
+    parent shell.
+    """
+    click.echo(SHELL_WRAPPERS[shell], nl=False)
 
 
 @cli.command("local")

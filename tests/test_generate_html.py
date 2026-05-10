@@ -1520,6 +1520,81 @@ class TestFindLocalProjects:
         assert all(r["name"] != "Global Sessions" for r in results)
 
 
+class TestResumeWritesCwdFile:
+    """When CCT_CWD_FILE is set in the environment, resume_session writes
+    the target cwd to that file before exec'ing claude. The shell wrapper
+    installed via `cct shell-init` reads it after claude exits to chdir
+    the parent shell."""
+
+    def test_writes_cwd_when_env_set(self, tmp_path, monkeypatch):
+        import claude_code_transcripts as ct
+
+        real_cwd = tmp_path / "proj"
+        real_cwd.mkdir()
+        jsonl = tmp_path / "sess.jsonl"
+        jsonl.write_text(f'{{"type":"user","cwd":"{real_cwd}"}}\n')
+
+        cwd_file = tmp_path / "cct-cwd"
+        monkeypatch.setenv("CCT_CWD_FILE", str(cwd_file))
+
+        # Stub execvp so the test doesn't actually replace the process.
+        monkeypatch.setattr(ct.os, "execvp", lambda *a, **kw: None)
+        monkeypatch.setattr(ct.os, "chdir", lambda *a, **kw: None)
+
+        ct.resume_session(jsonl)
+        assert cwd_file.read_text() == str(real_cwd)
+
+    def test_no_file_written_when_env_unset(self, tmp_path, monkeypatch):
+        """Plain `cct` (no wrapper) should not leave files behind."""
+        import claude_code_transcripts as ct
+
+        real_cwd = tmp_path / "proj"
+        real_cwd.mkdir()
+        jsonl = tmp_path / "sess.jsonl"
+        jsonl.write_text(f'{{"type":"user","cwd":"{real_cwd}"}}\n')
+
+        monkeypatch.delenv("CCT_CWD_FILE", raising=False)
+        monkeypatch.setattr(ct.os, "execvp", lambda *a, **kw: None)
+        monkeypatch.setattr(ct.os, "chdir", lambda *a, **kw: None)
+
+        ct.resume_session(jsonl)
+        # No file was specified so nothing should be written; just confirming
+        # the call didn't crash.
+
+
+class TestShellInit:
+    """`cct shell-init <shell>` prints a wrapper function the user evals
+    in their rc file. The function calls the underlying binary with
+    CCT_CWD_FILE set, then cd's the parent shell after exit."""
+
+    def test_zsh_output_contains_wrapper(self):
+        from click.testing import CliRunner
+        from claude_code_transcripts import cli
+
+        result = CliRunner().invoke(cli, ["shell-init", "zsh"])
+        assert result.exit_code == 0
+        assert "CCT_CWD_FILE" in result.output
+        assert "cct()" in result.output
+        # Must call the underlying binary, not recurse
+        assert "command cct" in result.output
+
+    def test_bash_output_contains_wrapper(self):
+        from click.testing import CliRunner
+        from claude_code_transcripts import cli
+
+        result = CliRunner().invoke(cli, ["shell-init", "bash"])
+        assert result.exit_code == 0
+        assert "CCT_CWD_FILE" in result.output
+        assert "cct()" in result.output
+
+    def test_unknown_shell_errors(self):
+        from click.testing import CliRunner
+        from claude_code_transcripts import cli
+
+        result = CliRunner().invoke(cli, ["shell-init", "tcsh"])
+        assert result.exit_code != 0
+
+
 class TestGetSessionCwd:
     """Tests for the JSONL cwd extractor used by the resume action."""
 
