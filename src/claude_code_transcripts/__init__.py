@@ -477,7 +477,16 @@ def select_entry(entries, actions=None):
             "updated": "fg:ansibrightgreen bold",
         }
     )
-    Application(layout=layout, key_bindings=kb, style=style, full_screen=False).run()
+    # erase_when_done removes the picker's frame from the terminal on exit
+    # so re-entering after a rename/summarize action doesn't leave a stack
+    # of duplicate frames in the scrollback.
+    Application(
+        layout=layout,
+        key_bindings=kb,
+        style=style,
+        full_screen=False,
+        erase_when_done=True,
+    ).run()
     return state["result"]
 
 
