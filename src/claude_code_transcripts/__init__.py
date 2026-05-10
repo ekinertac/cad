@@ -272,17 +272,24 @@ def find_local_sessions(folder, limit=10):
     return results[:limit]
 
 
-def select_session_action(sessions):
-    """Interactive session picker with two actions: ``resume`` (Enter) and
-    ``html`` (h). Modal search is opened with ``/`` so plain typing can't
-    coexist with ``h`` as a hotkey — the same pattern fzf/htop use.
+def select_entry(entries, actions=None):
+    """Interactive list picker with per-key actions and modal search.
 
-    Each entry in ``sessions`` must be a dict with at least ``display``
-    (string) populated; the full dict is passed back to the caller so it
-    has access to provider/cwd/session_id for dispatch. Returns
-    ``(session_dict, action)`` or ``None`` if the user cancelled.
+    ``actions`` is a dict mapping key names to action labels, e.g.
+    ``{"enter": "resume", "h": "transcript"}``. ``enter`` is treated as
+    the primary confirm key and gets auto-added if missing. Search mode is
+    opened with ``/`` so plain typing can't conflict with letter hotkeys
+    (the same pattern fzf/htop use). Inside search mode, typing builds the
+    filter; Enter still confirms with the primary action.
+
+    Each entry must be a dict with at least ``display`` populated. The full
+    entry dict is passed back to the caller so it can dispatch on whatever
+    metadata it included. Returns ``(entry, action_name)`` or ``None`` if
+    the user cancelled.
+
     Built directly on prompt_toolkit because questionary's select doesn't
-    expose per-key action binding.
+    expose per-key action binding — the alternative would be inconsistent
+    search behaviour between pickers, which is exactly what this avoids.
     """
     from prompt_toolkit import Application
     from prompt_toolkit.filters import Condition
@@ -292,21 +299,24 @@ def select_session_action(sessions):
     from prompt_toolkit.layout.dimension import Dimension
     from prompt_toolkit.styles import Style
 
+    if not actions:
+        actions = {"enter": "select"}
+    else:
+        actions = dict(actions)
+        actions.setdefault("enter", "select")
+
     state = {"selected": 0, "filter": "", "search_mode": False, "result": None}
     VISIBLE = 18
 
     def filtered_indices():
         if not state["filter"]:
-            return list(range(len(sessions)))
+            return list(range(len(entries)))
         needle = state["filter"].lower()
-        return [i for i, s in enumerate(sessions) if needle in s["display"].lower()]
+        return [i for i, e in enumerate(entries) if needle in e["display"].lower()]
 
     def viewport(indices):
-        """Slice the filtered list to a window around the cursor and return
-        (visible_indices, above_count, below_count) for scroll markers."""
         if not indices:
             return [], 0, 0
-        # Clamp the cursor against the filtered list.
         if state["selected"] >= len(indices):
             state["selected"] = len(indices) - 1
         if state["selected"] < 0:
@@ -329,7 +339,7 @@ def select_session_action(sessions):
             sel = pos == state["selected"]
             arrow = "» " if sel else "  "
             style = "class:selected" if sel else ""
-            out.append((style, f"{arrow}{sessions[src_i]['display']}\n"))
+            out.append((style, f"{arrow}{entries[src_i]['display']}\n"))
         if below > 0:
             out.append(("class:hint", f"  ▼ {below} more below\n"))
         return out
@@ -339,15 +349,14 @@ def select_session_action(sessions):
             return [
                 (
                     "class:status",
-                    f" /{state['filter']}▁  Enter=select · Esc=exit search\n",
+                    f" /{state['filter']}▁  Enter=confirm · Esc=exit search\n",
                 )
             ]
-        return [
-            (
-                "class:status",
-                " Enter=resume · h=transcript · /=search · Esc=cancel\n",
-            )
-        ]
+        # Render the hint line from the actions dict so it always reflects
+        # the configured keys for this picker.
+        parts = [f"{'Enter' if k == 'enter' else k}={v}" for k, v in actions.items()]
+        parts += ["/=search", "Esc=cancel"]
+        return [("class:status", " " + " · ".join(parts) + "\n")]
 
     kb = KeyBindings()
     not_searching = Condition(lambda: not state["search_mode"])
@@ -373,23 +382,27 @@ def select_session_action(sessions):
             len(filtered_indices()) - 1, state["selected"] + VISIBLE
         )
 
-    @kb.add("enter")
-    def _(event):
-        indices = filtered_indices()
-        if not indices:
-            return
-        # Enter in search mode does both: confirm filter AND pick (resume).
-        state["search_mode"] = False
-        state["result"] = (sessions[indices[state["selected"]]], "resume")
-        event.app.exit()
+    # Dynamic action bindings — one handler per configured key. Enter is
+    # always live (even in search mode, where it both confirms the filter
+    # and selects). Letter hotkeys only bind outside search mode so typing
+    # them while filtering doesn't accidentally pick.
+    def _make_action_handler(action_name):
+        def _handler(event):
+            indices = filtered_indices()
+            if not indices:
+                return
+            state["search_mode"] = False
+            state["result"] = (entries[indices[state["selected"]]], action_name)
+            event.app.exit()
 
-    @kb.add("h", filter=not_searching)
-    def _(event):
-        indices = filtered_indices()
-        if not indices:
-            return
-        state["result"] = (sessions[indices[state["selected"]]], "html")
-        event.app.exit()
+        return _handler
+
+    for key, action_name in actions.items():
+        handler = _make_action_handler(action_name)
+        if key == "enter":
+            kb.add(key)(handler)
+        else:
+            kb.add(key, filter=not_searching)(handler)
 
     @kb.add("/", filter=not_searching)
     def _(event):
@@ -429,8 +442,8 @@ def select_session_action(sessions):
                 Window(
                     content=FormattedTextControl(text=get_list_text),
                     height=Dimension(min=1, preferred=VISIBLE + 2, max=VISIBLE + 2),
-                    # Long summaries clip at the right edge instead of
-                    # wrapping into multi-row rows that break the layout.
+                    # Long lines clip at the right edge instead of wrapping
+                    # into multi-row rows that break the layout.
                     wrap_lines=False,
                 ),
                 Window(content=FormattedTextControl(text=get_status_text), height=1),
@@ -446,6 +459,14 @@ def select_session_action(sessions):
     )
     Application(layout=layout, key_bindings=kb, style=style, full_screen=False).run()
     return state["result"]
+
+
+def select_session_action(sessions):
+    """Backwards-compatible wrapper: the session picker with the original
+    ``resume`` (Enter) / ``html`` (h) actions. Existing tests and call
+    sites stay green; new code should use :func:`select_entry` directly.
+    """
+    return select_entry(sessions, actions={"enter": "resume", "h": "html"})
 
 
 PROVIDER_RESUME_COMMANDS = {
@@ -2503,20 +2524,13 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
         click.echo("No local sessions found.")
         return
 
-    project_choices = [
-        questionary.Choice(title=p["display"], value=p) for p in projects
-    ]
-    selected_project = questionary.select(
-        "Select a project:",
-        choices=project_choices,
-        use_search_filter=True,
-        use_jk_keys=False,
-        show_selected=True,
-    ).ask()
-
-    if selected_project is None:
+    # Project picker uses the same custom picker as the session step so
+    # the search UX is consistent (`/` opens search in both).
+    picked = select_entry(projects, actions={"enter": "open"})
+    if picked is None:
         click.echo("No project selected.")
         return
+    selected_project, _ = picked
 
     sessions = selected_project["sessions"]
     if not sessions:

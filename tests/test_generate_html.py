@@ -2032,6 +2032,31 @@ def _make_mock_select(returns, calls=None):
     return MockSelect
 
 
+def _make_mock_select_entry(returns):
+    """Stand-in for select_entry — pops from a queue on each call.
+
+    ``"__first__"`` returns ``(entries[0], "select")``.
+    ``("__first__", "html")`` returns ``(entries[0], "html")``.
+    ``None`` returns ``None`` (cancellation).
+    Plain tuples are returned as-is.
+    """
+    queue = list(returns)
+
+    def fake(entries, actions=None):
+        if not queue:
+            raise AssertionError("select_entry called more times than scripted")
+        v = queue.pop(0)
+        if v is None:
+            return None
+        if v == "__first__":
+            return (entries[0], "select")
+        if isinstance(v, tuple) and len(v) == 2 and v[0] == "__first__":
+            return (entries[0], v[1])
+        return v
+
+    return fake
+
+
 def _set_up_fake_home_with_session(tmp_path, monkeypatch, cwd_dir=None):
     """Build a fake ~/.claude/projects/<x>/<id>.jsonl pointing at cwd_dir.
 
@@ -2058,19 +2083,19 @@ def _set_up_fake_home_with_session(tmp_path, monkeypatch, cwd_dir=None):
 
 class TestLocalSessionCLI:
     """End-to-end CLI tests. Discovery runs for real against tmp fixtures;
-    only the interactive picker callbacks are mocked."""
+    only ``select_entry`` (the picker) is mocked. Both pickers (project
+    and session) go through the same function now."""
 
     def test_local_html_action_generates_transcript(self, tmp_path, monkeypatch):
         from click.testing import CliRunner
         from claude_code_transcripts import cli
         import claude_code_transcripts as ct
-        import questionary
 
-        _, _, _ = _set_up_fake_home_with_session(tmp_path, monkeypatch)
-
-        monkeypatch.setattr(questionary, "select", _make_mock_select(["__first__"]))
+        _set_up_fake_home_with_session(tmp_path, monkeypatch)
         monkeypatch.setattr(
-            ct, "select_session_action", lambda entries: (entries[0], "html")
+            ct,
+            "select_entry",
+            _make_mock_select_entry(["__first__", ("__first__", "html")]),
         )
 
         result = CliRunner().invoke(cli, ["local"])
@@ -2084,13 +2109,12 @@ class TestLocalSessionCLI:
         from click.testing import CliRunner
         from claude_code_transcripts import cli
         import claude_code_transcripts as ct
-        import questionary
 
         _, real_cwd, _ = _set_up_fake_home_with_session(tmp_path, monkeypatch)
-
-        monkeypatch.setattr(questionary, "select", _make_mock_select(["__first__"]))
         monkeypatch.setattr(
-            ct, "select_session_action", lambda entries: (entries[0], "resume")
+            ct,
+            "select_entry",
+            _make_mock_select_entry(["__first__", ("__first__", "resume")]),
         )
 
         exec_calls = []
@@ -2115,7 +2139,6 @@ class TestLocalSessionCLI:
         from click.testing import CliRunner
         from claude_code_transcripts import cli
         import claude_code_transcripts as ct
-        import questionary
 
         fake_home = tmp_path / "home"
         fake_home.mkdir()
@@ -2132,9 +2155,10 @@ class TestLocalSessionCLI:
             f'{{"id":"codex-uuid","cwd":"{real_cwd}"}}}}\n'
         )
 
-        monkeypatch.setattr(questionary, "select", _make_mock_select(["__first__"]))
         monkeypatch.setattr(
-            ct, "select_session_action", lambda entries: (entries[0], "resume")
+            ct,
+            "select_entry",
+            _make_mock_select_entry(["__first__", ("__first__", "resume")]),
         )
 
         exec_calls = []
@@ -2154,7 +2178,6 @@ class TestLocalSessionCLI:
         from click.testing import CliRunner
         from claude_code_transcripts import cli
         import claude_code_transcripts as ct
-        import questionary
 
         fake_home = tmp_path / "home"
         fake_home.mkdir()
@@ -2168,9 +2191,10 @@ class TestLocalSessionCLI:
             '{"id":"codex-uuid","cwd":"/Users/x/Code/foo"}}\n'
         )
 
-        monkeypatch.setattr(questionary, "select", _make_mock_select(["__first__"]))
         monkeypatch.setattr(
-            ct, "select_session_action", lambda entries: (entries[0], "html")
+            ct,
+            "select_entry",
+            _make_mock_select_entry(["__first__", ("__first__", "html")]),
         )
 
         result = CliRunner().invoke(cli, ["local"])
@@ -2180,10 +2204,10 @@ class TestLocalSessionCLI:
     def test_local_handles_cancelled_project_selection(self, tmp_path, monkeypatch):
         from click.testing import CliRunner
         from claude_code_transcripts import cli
-        import questionary
+        import claude_code_transcripts as ct
 
         _set_up_fake_home_with_session(tmp_path, monkeypatch)
-        monkeypatch.setattr(questionary, "select", _make_mock_select([None]))
+        monkeypatch.setattr(ct, "select_entry", _make_mock_select_entry([None]))
 
         result = CliRunner().invoke(cli, ["local"])
         assert result.exit_code == 0
@@ -2193,38 +2217,48 @@ class TestLocalSessionCLI:
         from click.testing import CliRunner
         from claude_code_transcripts import cli
         import claude_code_transcripts as ct
-        import questionary
 
         _set_up_fake_home_with_session(tmp_path, monkeypatch)
-        monkeypatch.setattr(questionary, "select", _make_mock_select(["__first__"]))
-        monkeypatch.setattr(ct, "select_session_action", lambda entries: None)
+        monkeypatch.setattr(
+            ct,
+            "select_entry",
+            _make_mock_select_entry(["__first__", None]),
+        )
 
         result = CliRunner().invoke(cli, ["local"])
         assert result.exit_code == 0
         assert "No session selected" in result.output
 
-    def test_project_picker_has_search_filter_enabled(self, tmp_path, monkeypatch):
-        """The project picker (still on questionary) keeps type-to-filter."""
+    def test_both_pickers_use_select_entry(self, tmp_path, monkeypatch):
+        """Both pickers now route through the same select_entry function,
+        which guarantees identical search-via-/ UX. Asserts that
+        select_entry is called twice (project step + session step)."""
         from click.testing import CliRunner
         from claude_code_transcripts import cli
         import claude_code_transcripts as ct
-        import questionary
 
         _set_up_fake_home_with_session(tmp_path, monkeypatch)
-        calls = []
-        monkeypatch.setattr(
-            questionary,
-            "select",
-            _make_mock_select(["__first__"], calls=calls),
-        )
-        monkeypatch.setattr(
-            ct, "select_session_action", lambda entries: (entries[0], "html")
-        )
+
+        call_log = []
+
+        def fake_select_entry(entries, actions=None):
+            call_log.append({"actions": actions, "n_entries": len(entries)})
+            return entries[0], list(actions.keys())[0] if actions else "select"
+
+        monkeypatch.setattr(ct, "select_entry", fake_select_entry)
+
+        # Need to also intercept exec so the resume action doesn't try to
+        # spawn claude during the test.
+        monkeypatch.setattr(ct.os, "execvp", lambda *a, **kw: None)
+        monkeypatch.setattr(ct.os, "chdir", lambda *a, **kw: None)
 
         result = CliRunner().invoke(cli, ["local"])
-        assert result.exit_code == 0
-        assert len(calls) == 1
-        assert calls[0].get("use_search_filter") is True
+        assert result.exit_code == 0, result.output
+        assert len(call_log) == 2, call_log
+        # First call is the project picker — has the single "open" action.
+        assert "enter" in call_log[0]["actions"]
+        # Second call is the session picker — has at least resume + html.
+        assert "h" in call_log[1]["actions"]
 
 
 class TestOutputAutoOption:
@@ -2303,7 +2337,6 @@ class TestOutputAutoOption:
         from click.testing import CliRunner
         from claude_code_transcripts import cli
         import claude_code_transcripts as ct
-        import questionary
 
         fake_home = tmp_path / "home"
         fake_home.mkdir()
@@ -2322,9 +2355,10 @@ class TestOutputAutoOption:
         output_parent = tmp_path / "output"
         output_parent.mkdir()
 
-        monkeypatch.setattr(questionary, "select", _make_mock_select(["__first__"]))
         monkeypatch.setattr(
-            ct, "select_session_action", lambda entries: (entries[0], "html")
+            ct,
+            "select_entry",
+            _make_mock_select_entry(["__first__", ("__first__", "html")]),
         )
 
         result = CliRunner().invoke(cli, ["local", "-a", "-o", str(output_parent)])
