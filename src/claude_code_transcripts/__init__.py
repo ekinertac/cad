@@ -566,6 +566,32 @@ def prompt_for_title(default=""):
     return text.strip()
 
 
+def prompt_for_cwd(default=""):
+    """Prompt for a session's new project directory. Resolves ``~``,
+    validates the path exists and is a directory. Returns the absolute
+    path string, or the sentinel ``""`` to mean "remove existing
+    override", or ``None`` if cancelled.
+    """
+    from prompt_toolkit import prompt as _ptk_prompt
+    from prompt_toolkit.formatted_text import FormattedText
+
+    try:
+        text = _ptk_prompt(
+            FormattedText([("class:prompt", "New cwd (empty to clear): ")]),
+            default=default,
+        )
+    except (KeyboardInterrupt, EOFError):
+        return None
+    text = text.strip()
+    if not text:
+        return ""
+    path = Path(text).expanduser().resolve()
+    if not path.is_dir():
+        click.echo(f"Not a directory: {path}", err=True)
+        return None
+    return str(path)
+
+
 def _read_session_excerpt_for_summary(session, max_chars=2000):
     """Pull a reasonable excerpt from a session for the summarize prompt.
 
@@ -1130,6 +1156,56 @@ def get_title_override(session):
     return _load_titles().get(f"{session['provider']}:{session['session_id']}")
 
 
+def _cwd_overrides_file():
+    """Sidecar storage for cct's per-session cwd overrides — set via the
+    picker's ``m`` (move) action. Lets the user reassign which project a
+    session belongs to without modifying the agent's own session files.
+    Same key shape as the titles sidecar.
+    """
+    return Path.home() / ".cct" / "cwd-overrides.json"
+
+
+def _load_cwd_overrides():
+    f = _cwd_overrides_file()
+    if not f.exists():
+        return {}
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_cwd_override(provider, session_id, cwd):
+    """Move a session into a different cct project. Empty/falsy ``cwd``
+    removes the override (i.e. the session goes back to wherever its
+    agent file recorded it). Path is normalised before storing so we can
+    rely on string equality for the Global Sessions match later.
+    """
+    f = _cwd_overrides_file()
+    overrides = _load_cwd_overrides()
+    key = f"{provider}:{session_id}"
+    if cwd:
+        overrides[key] = str(Path(cwd).expanduser().resolve())
+    else:
+        overrides.pop(key, None)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(overrides, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def get_cwd_override(provider, session_id):
+    return _load_cwd_overrides().get(f"{provider}:{session_id}")
+
+
+def _apply_cwd_override(session):
+    """If a cwd override exists for this session, swap it into the dict.
+    Called from each discovery function so downstream grouping/resume
+    logic stays oblivious to where the override came from.
+    """
+    override = get_cwd_override(session["provider"], session["session_id"])
+    if override:
+        session["cwd"] = override
+
+
 def load_session_summary(session):
     """Populate ``session['summary']`` and ``session['display']`` in place.
 
@@ -1222,6 +1298,10 @@ def find_local_projects(folder=None):
         + find_opencode_sessions()
         + find_forge_sessions()
     )
+    # Apply user-set cwd overrides before grouping so a moved session
+    # appears under its new project — agent files are never modified.
+    for s in sessions:
+        _apply_cwd_override(s)
     return _group_sessions_into_projects(sessions)
 
 
@@ -2760,6 +2840,7 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
                 "h": "html",
                 "r": "rename",
                 "s": "summarize",
+                "m": "move",
             },
         )
         if picked is None:
@@ -2792,6 +2873,21 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
             session["_recently_updated"] = True
             load_session_summary(session)
             click.echo(f"Saved title: {title}")
+            continue
+
+        if action == "move":
+            new_cwd = prompt_for_cwd(default=session.get("cwd") or "")
+            if new_cwd is None:  # cancel or invalid path
+                continue
+            save_cwd_override(session["provider"], session["session_id"], new_cwd)
+            # Update the in-memory session so the row reflects the new
+            # cwd immediately — discovery will pick it up on next cct run.
+            session["cwd"] = new_cwd or session["cwd"]
+            session["display"] = None
+            session["_recently_updated"] = True
+            load_session_summary(session)
+            verb = "Moved" if new_cwd else "Cleared override for"
+            click.echo(f"{verb} session to {new_cwd or session['cwd']}")
             continue
 
         if action == "resume":

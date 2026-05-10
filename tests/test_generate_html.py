@@ -1749,6 +1749,58 @@ class TestFindForgeSessions:
         assert find_forge_sessions(db) == []
 
 
+class TestCwdOverrideSidecar:
+    """Cwd overrides live at ~/.cct/cwd-overrides.json. Discovery swaps
+    them in before grouping, so a moved session lands in the new project.
+    Agent files are never touched."""
+
+    def test_save_and_read_override(self, tmp_path, monkeypatch):
+        import claude_code_transcripts as ct
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        target = tmp_path / "new-project"
+        target.mkdir()
+        ct.save_cwd_override("claude", "abc-123", str(target))
+        # Stored as resolved absolute path
+        assert ct.get_cwd_override("claude", "abc-123") == str(target.resolve())
+
+    def test_empty_cwd_clears_override(self, tmp_path, monkeypatch):
+        import claude_code_transcripts as ct
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        target = tmp_path / "x"
+        target.mkdir()
+        ct.save_cwd_override("claude", "abc", str(target))
+        ct.save_cwd_override("claude", "abc", "")
+        assert ct.get_cwd_override("claude", "abc") is None
+
+    def test_override_moves_session_to_new_project(self, tmp_path, monkeypatch):
+        """A claude session whose JSONL records cwd=A but has a sidecar
+        override pointing at B groups under B."""
+        import claude_code_transcripts as ct
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        proj_dir = fake_home / ".claude" / "projects" / "test-project"
+        proj_dir.mkdir(parents=True)
+        sess_file = proj_dir / "abc-123.jsonl"
+        sess_file.write_text(
+            '{"type":"summary","summary":"x"}\n'
+            '{"type":"user","cwd":"/Users/x/Code/old",'
+            '"message":{"content":"hi"}}\n'
+        )
+
+        new_cwd = tmp_path / "new-project"
+        new_cwd.mkdir()
+        ct.save_cwd_override("claude", "abc-123", str(new_cwd))
+
+        projects = ct.find_local_projects(fake_home / ".claude" / "projects")
+        assert len(projects) == 1
+        assert projects[0]["cwd"] == str(new_cwd.resolve())
+
+
 class TestTitleOverrideSidecar:
     """Sidecar lives at ~/.cct/titles.json, keyed by '<provider>:<id>'."""
 
@@ -2335,6 +2387,35 @@ class TestLocalSessionCLI:
         result = CliRunner().invoke(cli, ["local"])
         assert result.exit_code == 0, result.output
         assert captured["entry"].get("_recently_updated") is True
+
+    def test_move_action_saves_cwd_override(self, tmp_path, monkeypatch):
+        """Pressing m, entering a valid path, saves the cwd override and
+        marks the row as recently updated."""
+        from click.testing import CliRunner
+        from claude_code_transcripts import cli
+        import claude_code_transcripts as ct
+
+        _set_up_fake_home_with_session(tmp_path, monkeypatch)
+        target = tmp_path / "new-target"
+        target.mkdir()
+
+        call_count = {"n": 0}
+
+        def fake_select_entry(entries, actions=None):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return entries[0], "open"  # project picker
+            if call_count["n"] == 2:
+                return entries[0], "move"  # session picker, trigger move
+            return None  # session picker round 2 — cancel
+
+        monkeypatch.setattr(ct, "select_entry", fake_select_entry)
+        monkeypatch.setattr(ct, "prompt_for_cwd", lambda default="": str(target))
+
+        result = CliRunner().invoke(cli, ["local"])
+        assert result.exit_code == 0, result.output
+
+        assert ct.get_cwd_override("claude", "abc-123") == str(target.resolve())
 
     def test_summarize_action_calls_llm_and_loops(self, tmp_path, monkeypatch):
         """Pressing s runs summarize_session, saves its return as the
