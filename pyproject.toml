@@ -1,5 +1,5 @@
 [project]
-name = "claude-code-transcripts"
+name = "cad"
 version = "0.6"
 description = "Multi-agent coding-session manager and transcript viewer for claude, codex, pi, opencode, forge"
 readme = "README.md"
@@ -20,14 +20,13 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/ekinertac/claude-code-transcripts"
-Changelog = "https://github.com/ekinertac/claude-code-transcripts/releases"
-Issues = "https://github.com/ekinertac/claude-code-transcripts/issues"
-CI = "https://github.com/ekinertac/claude-code-transcripts/actions"
+Homepage = "https://github.com/ekinertac/cad"
+Changelog = "https://github.com/ekinertac/cad/releases"
+Issues = "https://github.com/ekinertac/cad/issues"
+CI = "https://github.com/ekinertac/cad/actions"
 
 [project.scripts]
-claude-code-transcripts = "claude_code_transcripts:main"
-cct = "claude_code_transcripts:main"
+cad = "cad:main"
 
 [build-system]
 requires = ["uv_build>=0.9.7,<0.10.0"]

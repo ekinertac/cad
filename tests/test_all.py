@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from claude_code_transcripts import (
+from cad import (
     cli,
     find_all_sessions,
     get_project_display_name,
@@ -279,16 +279,14 @@ class TestGenerateBatchHtml:
             )
 
             # Patch generate_html to fail on one specific session
-            original_generate_html = __import__("claude_code_transcripts").generate_html
+            original_generate_html = __import__("cad").generate_html
 
             def mock_generate_html(json_path, output_dir, github_repo=None):
                 if "session1" in str(json_path):
                     raise RuntimeError("Simulated failure")
                 return original_generate_html(json_path, output_dir, github_repo)
 
-            with patch(
-                "claude_code_transcripts.generate_html", side_effect=mock_generate_html
-            ):
+            with patch("cad.generate_html", side_effect=mock_generate_html):
                 stats = generate_batch_html(projects_dir, output_dir)
 
             # Should have processed session2 successfully
@@ -434,9 +432,7 @@ class TestJsonCommandWithUrl:
         mock_response.raise_for_status = MagicMock()
 
         runner = CliRunner()
-        with patch(
-            "claude_code_transcripts.httpx.get", return_value=mock_response
-        ) as mock_get:
+        with patch("cad.httpx.get", return_value=mock_response) as mock_get:
             result = runner.invoke(
                 cli,
                 [
@@ -467,9 +463,7 @@ class TestJsonCommandWithUrl:
         mock_response.raise_for_status = MagicMock()
 
         runner = CliRunner()
-        with patch(
-            "claude_code_transcripts.httpx.get", return_value=mock_response
-        ) as mock_get:
+        with patch("cad.httpx.get", return_value=mock_response) as mock_get:
             result = runner.invoke(
                 cli,
                 [
@@ -490,7 +484,7 @@ class TestJsonCommandWithUrl:
 
         runner = CliRunner()
         with patch(
-            "claude_code_transcripts.httpx.get",
+            "cad.httpx.get",
             side_effect=httpx.RequestError("Network error"),
         ):
             result = runner.invoke(
@@ -537,7 +531,7 @@ class TestWebCommandRepoFiltering:
 
     def test_detect_github_repo_from_session(self):
         """Test that detect_github_repo extracts repo from session loglines."""
-        from claude_code_transcripts import detect_github_repo
+        from cad import detect_github_repo
 
         loglines = [
             {
@@ -558,7 +552,7 @@ class TestWebCommandRepoFiltering:
 
     def test_detect_github_repo_returns_none_when_not_found(self):
         """Test that detect_github_repo returns None when no repo found."""
-        from claude_code_transcripts import detect_github_repo
+        from cad import detect_github_repo
 
         loglines = [
             {
@@ -571,7 +565,7 @@ class TestWebCommandRepoFiltering:
 
     def test_enrich_sessions_with_repos(self):
         """Test enriching sessions with repo information from session metadata."""
-        from claude_code_transcripts import enrich_sessions_with_repos
+        from cad import enrich_sessions_with_repos
 
         # Mock sessions from the API list with session_context
         sessions = [
@@ -603,7 +597,7 @@ class TestWebCommandRepoFiltering:
 
     def test_extract_repo_from_session_outcomes(self):
         """Test extracting repo from session_context.outcomes."""
-        from claude_code_transcripts import extract_repo_from_session
+        from cad import extract_repo_from_session
 
         session = {
             "session_context": {
@@ -619,7 +613,7 @@ class TestWebCommandRepoFiltering:
 
     def test_extract_repo_from_session_sources_url(self):
         """Test extracting repo from session_context.sources URL."""
-        from claude_code_transcripts import extract_repo_from_session
+        from cad import extract_repo_from_session
 
         session = {
             "session_context": {
@@ -635,14 +629,14 @@ class TestWebCommandRepoFiltering:
 
     def test_extract_repo_from_session_no_context(self):
         """Test extracting repo when no session_context exists."""
-        from claude_code_transcripts import extract_repo_from_session
+        from cad import extract_repo_from_session
 
         session = {"id": "sess1", "title": "No context"}
         assert extract_repo_from_session(session) is None
 
     def test_filter_sessions_by_repo(self):
         """Test filtering sessions by repo."""
-        from claude_code_transcripts import filter_sessions_by_repo
+        from cad import filter_sessions_by_repo
 
         sessions = [
             {"id": "sess1", "title": "Session 1", "repo": "simonw/datasette"},
@@ -656,7 +650,7 @@ class TestWebCommandRepoFiltering:
 
     def test_filter_sessions_by_repo_none_returns_all(self):
         """Test that filtering with None repo returns all sessions."""
-        from claude_code_transcripts import filter_sessions_by_repo
+        from cad import filter_sessions_by_repo
 
         sessions = [
             {"id": "sess1", "title": "Session 1", "repo": "simonw/datasette"},
@@ -668,7 +662,7 @@ class TestWebCommandRepoFiltering:
 
     def test_format_session_for_display_with_repo(self):
         """Test formatting session display with repo first."""
-        from claude_code_transcripts import format_session_for_display
+        from cad import format_session_for_display
 
         session = {
             "id": "sess1",
@@ -685,7 +679,7 @@ class TestWebCommandRepoFiltering:
 
     def test_format_session_for_display_without_repo(self):
         """Test formatting session display without repo."""
-        from claude_code_transcripts import format_session_for_display
+        from cad import format_session_for_display
 
         session = {
             "id": "sess1",

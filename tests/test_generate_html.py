@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from syrupy.extensions.single_file import SingleFileSnapshotExtension, WriteMode
 
-from claude_code_transcripts import (
+from cad import (
     generate_html,
     detect_github_repo,
     render_markdown_text,
@@ -296,10 +296,10 @@ class TestRenderContentBlock:
     def test_tool_result_with_commit(self, snapshot_html):
         """Test tool result with git commit output."""
         # Need to set the global _github_repo for commit link rendering
-        import claude_code_transcripts
+        import cad
 
-        old_repo = claude_code_transcripts._github_repo
-        claude_code_transcripts._github_repo = "example/repo"
+        old_repo = cad._github_repo
+        cad._github_repo = "example/repo"
         try:
             block = {
                 "type": "tool_result",
@@ -309,7 +309,7 @@ class TestRenderContentBlock:
             result = render_content_block(block)
             assert result == snapshot_html
         finally:
-            claude_code_transcripts._github_repo = old_repo
+            cad._github_repo = old_repo
 
     def test_tool_result_with_image(self, snapshot_html):
         """Test tool result containing image blocks in content array.
@@ -673,7 +673,7 @@ class TestSessionGistOption:
     def test_session_gist_creates_gist(self, monkeypatch, tmp_path):
         """Test that session --gist creates a gist."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
+        from cad import cli
         import subprocess
 
         # Create sample session file
@@ -693,9 +693,7 @@ class TestSessionGistOption:
         monkeypatch.setattr(subprocess, "run", mock_run)
 
         # Mock tempfile.gettempdir to use our tmp_path
-        monkeypatch.setattr(
-            "claude_code_transcripts.tempfile.gettempdir", lambda: str(tmp_path)
-        )
+        monkeypatch.setattr("cad.tempfile.gettempdir", lambda: str(tmp_path))
 
         runner = CliRunner()
         result = runner.invoke(
@@ -711,7 +709,7 @@ class TestSessionGistOption:
     def test_session_gist_with_output_dir(self, monkeypatch, output_dir):
         """Test that session --gist with -o uses specified directory."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
+        from cad import cli
         import subprocess
 
         fixture_path = Path(__file__).parent / "sample_session.json"
@@ -849,7 +847,7 @@ class TestSessionJsonOption:
     def test_session_json_copies_file(self, output_dir):
         """Test that session --json copies the JSON file to output."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
+        from cad import cli
 
         fixture_path = Path(__file__).parent / "sample_session.json"
 
@@ -868,7 +866,7 @@ class TestSessionJsonOption:
     def test_session_json_preserves_original_name(self, output_dir):
         """Test that --json preserves the original filename."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
+        from cad import cli
 
         fixture_path = Path(__file__).parent / "sample_session.json"
 
@@ -890,7 +888,7 @@ class TestImportJsonOption:
     def test_import_json_saves_session_data(self, httpx_mock, output_dir):
         """Test that import --json saves the session JSON."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
+        from cad import cli
 
         # Load sample session to mock API response
         fixture_path = Path(__file__).parent / "sample_session.json"
@@ -936,7 +934,7 @@ class TestImportGistOption:
     def test_import_gist_creates_gist(self, httpx_mock, monkeypatch, tmp_path):
         """Test that import --gist creates a gist."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
+        from cad import cli
         import subprocess
 
         # Load sample session to mock API response
@@ -963,9 +961,7 @@ class TestImportGistOption:
         monkeypatch.setattr(subprocess, "run", mock_run)
 
         # Mock tempfile.gettempdir
-        monkeypatch.setattr(
-            "claude_code_transcripts.tempfile.gettempdir", lambda: str(tmp_path)
-        )
+        monkeypatch.setattr("cad.tempfile.gettempdir", lambda: str(tmp_path))
 
         runner = CliRunner()
         result = runner.invoke(
@@ -994,12 +990,12 @@ class TestVersionOption:
         """Test that --version shows version info."""
         import importlib.metadata
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
+        from cad import cli
 
         runner = CliRunner()
         result = runner.invoke(cli, ["--version"])
 
-        expected_version = importlib.metadata.version("claude-code-transcripts")
+        expected_version = importlib.metadata.version("cad")
         assert result.exit_code == 0
         assert expected_version in result.output
 
@@ -1007,12 +1003,12 @@ class TestVersionOption:
         """Test that -v shows version info."""
         import importlib.metadata
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
+        from cad import cli
 
         runner = CliRunner()
         result = runner.invoke(cli, ["-v"])
 
-        expected_version = importlib.metadata.version("claude-code-transcripts")
+        expected_version = importlib.metadata.version("cad")
         assert result.exit_code == 0
         assert expected_version in result.output
 
@@ -1023,7 +1019,7 @@ class TestOpenOption:
     def test_session_open_calls_webbrowser(self, output_dir, monkeypatch):
         """Test that session --open opens the browser."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
+        from cad import cli
 
         fixture_path = Path(__file__).parent / "sample_session.json"
 
@@ -1034,7 +1030,7 @@ class TestOpenOption:
             opened_urls.append(url)
             return True
 
-        monkeypatch.setattr("claude_code_transcripts.webbrowser.open", mock_open)
+        monkeypatch.setattr("cad.webbrowser.open", mock_open)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -1050,7 +1046,7 @@ class TestOpenOption:
     def test_import_open_calls_webbrowser(self, httpx_mock, output_dir, monkeypatch):
         """Test that import --open opens the browser."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
+        from cad import cli
 
         # Load sample session to mock API response
         fixture_path = Path(__file__).parent / "sample_session.json"
@@ -1069,7 +1065,7 @@ class TestOpenOption:
             opened_urls.append(url)
             return True
 
-        monkeypatch.setattr("claude_code_transcripts.webbrowser.open", mock_open)
+        monkeypatch.setattr("cad.webbrowser.open", mock_open)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -1459,7 +1455,7 @@ class TestFindLocalProjects:
 
     def test_does_not_load_summaries(self, tmp_path, monkeypatch):
         """The project picker hydration must not pull summaries up front."""
-        import claude_code_transcripts as ct
+        import cad as ct
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake-home")
         projects_dir = tmp_path / ".claude" / "projects"
@@ -1750,12 +1746,12 @@ class TestFindForgeSessions:
 
 
 class TestCwdOverrideSidecar:
-    """Cwd overrides live at ~/.cct/cwd-overrides.json. Discovery swaps
+    """Cwd overrides live at ~/.cad/cwd-overrides.json. Discovery swaps
     them in before grouping, so a moved session lands in the new project.
     Agent files are never touched."""
 
     def test_save_and_read_override(self, tmp_path, monkeypatch):
-        import claude_code_transcripts as ct
+        import cad as ct
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         target = tmp_path / "new-project"
@@ -1765,7 +1761,7 @@ class TestCwdOverrideSidecar:
         assert ct.get_cwd_override("claude", "abc-123") == str(target.resolve())
 
     def test_empty_cwd_clears_override(self, tmp_path, monkeypatch):
-        import claude_code_transcripts as ct
+        import cad as ct
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         target = tmp_path / "x"
@@ -1777,7 +1773,7 @@ class TestCwdOverrideSidecar:
     def test_override_moves_session_to_new_project(self, tmp_path, monkeypatch):
         """A claude session whose JSONL records cwd=A but has a sidecar
         override pointing at B groups under B."""
-        import claude_code_transcripts as ct
+        import cad as ct
 
         fake_home = tmp_path / "home"
         fake_home.mkdir()
@@ -1802,10 +1798,10 @@ class TestCwdOverrideSidecar:
 
 
 class TestTitleOverrideSidecar:
-    """Sidecar lives at ~/.cct/titles.json, keyed by '<provider>:<id>'."""
+    """Sidecar lives at ~/.cad/titles.json, keyed by '<provider>:<id>'."""
 
     def test_save_and_read_override(self, tmp_path, monkeypatch):
-        import claude_code_transcripts as ct
+        import cad as ct
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         ct.save_title_override("claude", "abc-123", "My title")
@@ -1813,7 +1809,7 @@ class TestTitleOverrideSidecar:
         assert ct.get_title_override(sess) == "My title"
 
     def test_empty_title_removes_override(self, tmp_path, monkeypatch):
-        import claude_code_transcripts as ct
+        import cad as ct
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         ct.save_title_override("claude", "abc", "First")
@@ -1824,7 +1820,7 @@ class TestTitleOverrideSidecar:
     def test_override_wins_over_native_summary(self, tmp_path, monkeypatch):
         """load_session_summary picks the override even when a provider
         summary is already set (opencode/forge case)."""
-        import claude_code_transcripts as ct
+        import cad as ct
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         ct.save_title_override("opencode", "ses_abc", "Custom name")
@@ -1845,20 +1841,20 @@ class TestTitleOverrideSidecar:
 
 
 class TestResumeWritesCwdFile:
-    """When CCT_CWD_FILE is set in the environment, resume_session writes
+    """When CAD_CWD_FILE is set in the environment, resume_session writes
     the target cwd to that file before exec'ing claude. The shell wrapper
-    installed via `cct shell-init` reads it after the agent exits to chdir
+    installed via `cad shell-init` reads it after the agent exits to chdir
     the parent shell."""
 
     def test_writes_cwd_when_env_set(self, tmp_path, monkeypatch):
-        import claude_code_transcripts as ct
+        import cad as ct
 
         real_cwd = tmp_path / "proj"
         real_cwd.mkdir()
         sess = _make_session("claude", "abc", real_cwd)
 
-        cwd_file = tmp_path / "cct-cwd"
-        monkeypatch.setenv("CCT_CWD_FILE", str(cwd_file))
+        cwd_file = tmp_path / "cad-cwd"
+        monkeypatch.setenv("CAD_CWD_FILE", str(cwd_file))
         monkeypatch.setattr(ct.os, "execvp", lambda *a, **kw: None)
         monkeypatch.setattr(ct.os, "chdir", lambda *a, **kw: None)
 
@@ -1867,13 +1863,13 @@ class TestResumeWritesCwdFile:
 
     def test_no_file_written_when_env_unset(self, tmp_path, monkeypatch):
         """Plain `cct` (no wrapper) should not leave files behind."""
-        import claude_code_transcripts as ct
+        import cad as ct
 
         real_cwd = tmp_path / "proj"
         real_cwd.mkdir()
         sess = _make_session("claude", "abc", real_cwd)
 
-        monkeypatch.delenv("CCT_CWD_FILE", raising=False)
+        monkeypatch.delenv("CAD_CWD_FILE", raising=False)
         monkeypatch.setattr(ct.os, "execvp", lambda *a, **kw: None)
         monkeypatch.setattr(ct.os, "chdir", lambda *a, **kw: None)
 
@@ -1884,7 +1880,7 @@ class TestResumeWritesCwdFile:
     def test_codex_provider_invokes_codex_resume(self, tmp_path, monkeypatch):
         """resume_session dispatches to ``codex resume <id>`` for codex
         sessions instead of claude --resume."""
-        import claude_code_transcripts as ct
+        import cad as ct
 
         real_cwd = tmp_path / "proj"
         real_cwd.mkdir()
@@ -1905,33 +1901,33 @@ class TestResumeWritesCwdFile:
 
 
 class TestShellInit:
-    """`cct shell-init <shell>` prints a wrapper function the user evals
+    """`cad shell-init <shell>` prints a wrapper function the user evals
     in their rc file. The function calls the underlying binary with
-    CCT_CWD_FILE set, then cd's the parent shell after exit."""
+    CAD_CWD_FILE set, then cd's the parent shell after exit."""
 
     def test_zsh_output_contains_wrapper(self):
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
+        from cad import cli
 
         result = CliRunner().invoke(cli, ["shell-init", "zsh"])
         assert result.exit_code == 0
-        assert "CCT_CWD_FILE" in result.output
-        assert "cct()" in result.output
+        assert "CAD_CWD_FILE" in result.output
+        assert "cad()" in result.output
         # Must call the underlying binary, not recurse
-        assert "command cct" in result.output
+        assert "command cad" in result.output
 
     def test_bash_output_contains_wrapper(self):
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
+        from cad import cli
 
         result = CliRunner().invoke(cli, ["shell-init", "bash"])
         assert result.exit_code == 0
-        assert "CCT_CWD_FILE" in result.output
-        assert "cct()" in result.output
+        assert "CAD_CWD_FILE" in result.output
+        assert "cad()" in result.output
 
     def test_unknown_shell_errors(self):
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
+        from cad import cli
 
         result = CliRunner().invoke(cli, ["shell-init", "tcsh"])
         assert result.exit_code != 0
@@ -2059,7 +2055,7 @@ class TestGetSessionTranscript:
     tool calls / system meta."""
 
     def test_claude_extracts_user_and_assistant(self, tmp_path):
-        import claude_code_transcripts as ct
+        import cad as ct
 
         f = tmp_path / "s.jsonl"
         f.write_text(
@@ -2076,7 +2072,7 @@ class TestGetSessionTranscript:
         assert rows == [("user", "hi"), ("assistant", "hello"), ("user", "again")]
 
     def test_codex_extracts_user_message_and_agent_message(self, tmp_path):
-        import claude_code_transcripts as ct
+        import cad as ct
 
         f = tmp_path / "s.jsonl"
         f.write_text(
@@ -2090,7 +2086,7 @@ class TestGetSessionTranscript:
         assert rows == [("user", "hi"), ("assistant", "hello")]
 
     def test_returns_empty_for_unsupported_provider(self, tmp_path):
-        import claude_code_transcripts as ct
+        import cad as ct
 
         sess = {"provider": "opencode", "filepath": tmp_path / "x.db"}
         assert ct.get_session_transcript(sess) == []
@@ -2103,8 +2099,8 @@ class TestPeekAction:
         self, tmp_path, monkeypatch
     ):
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
-        import claude_code_transcripts as ct
+        from cad import cli
+        import cad as ct
 
         _set_up_fake_home_with_session(tmp_path, monkeypatch)
 
@@ -2145,7 +2141,7 @@ class TestPeekAction:
 
 class TestPruneTempOutputs:
     """Tests for the temp-output prune helper that bounds disk usage in
-    $TMPDIR/claude-code-transcripts/."""
+    $TMPDIR/cad/."""
 
     def test_does_nothing_when_under_threshold(self, tmp_path):
         for i in range(3):
@@ -2272,8 +2268,8 @@ class TestLocalSessionCLI:
 
     def test_local_html_action_generates_transcript(self, tmp_path, monkeypatch):
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
-        import claude_code_transcripts as ct
+        from cad import cli
+        import cad as ct
 
         _set_up_fake_home_with_session(tmp_path, monkeypatch)
         monkeypatch.setattr(
@@ -2291,8 +2287,8 @@ class TestLocalSessionCLI:
         """Default Enter (resume) chdir's to cwd and exec's claude with
         skip-permissions."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
-        import claude_code_transcripts as ct
+        from cad import cli
+        import cad as ct
 
         _, real_cwd, _ = _set_up_fake_home_with_session(tmp_path, monkeypatch)
         monkeypatch.setattr(
@@ -2321,8 +2317,8 @@ class TestLocalSessionCLI:
     def test_local_resume_codex(self, tmp_path, monkeypatch):
         """Resume on a codex session execs `codex resume <id>` instead."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
-        import claude_code_transcripts as ct
+        from cad import cli
+        import cad as ct
 
         fake_home = tmp_path / "home"
         fake_home.mkdir()
@@ -2360,8 +2356,8 @@ class TestLocalSessionCLI:
         """Pressing h on a codex session prints the not-yet-supported note
         and returns without trying to render."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
-        import claude_code_transcripts as ct
+        from cad import cli
+        import cad as ct
 
         fake_home = tmp_path / "home"
         fake_home.mkdir()
@@ -2387,8 +2383,8 @@ class TestLocalSessionCLI:
 
     def test_local_handles_cancelled_project_selection(self, tmp_path, monkeypatch):
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
-        import claude_code_transcripts as ct
+        from cad import cli
+        import cad as ct
 
         _set_up_fake_home_with_session(tmp_path, monkeypatch)
         monkeypatch.setattr(ct, "select_entry", _make_mock_select_entry([None]))
@@ -2399,8 +2395,8 @@ class TestLocalSessionCLI:
 
     def test_local_handles_cancelled_session_selection(self, tmp_path, monkeypatch):
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
-        import claude_code_transcripts as ct
+        from cad import cli
+        import cad as ct
 
         _set_up_fake_home_with_session(tmp_path, monkeypatch)
         monkeypatch.setattr(
@@ -2418,8 +2414,8 @@ class TestLocalSessionCLI:
         and re-enters the session picker. Picking 'resume' on the second
         round then triggers the exec."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
-        import claude_code_transcripts as ct
+        from cad import cli
+        import cad as ct
 
         _, real_cwd, _ = _set_up_fake_home_with_session(tmp_path, monkeypatch)
 
@@ -2450,8 +2446,8 @@ class TestLocalSessionCLI:
         """After rename, the session dict carries _recently_updated=True so
         the picker can green-highlight it on the next render."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
-        import claude_code_transcripts as ct
+        from cad import cli
+        import cad as ct
 
         _set_up_fake_home_with_session(tmp_path, monkeypatch)
 
@@ -2483,8 +2479,8 @@ class TestLocalSessionCLI:
         """Esc/Bksp on the session picker routes back to the project
         picker (outer loop) instead of quitting cct."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
-        import claude_code_transcripts as ct
+        from cad import cli
+        import cad as ct
 
         _set_up_fake_home_with_session(tmp_path, monkeypatch)
 
@@ -2515,8 +2511,8 @@ class TestLocalSessionCLI:
         """Pressing m, entering a valid path, saves the cwd override and
         marks the row as recently updated."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
-        import claude_code_transcripts as ct
+        from cad import cli
+        import cad as ct
 
         _set_up_fake_home_with_session(tmp_path, monkeypatch)
         target = tmp_path / "new-target"
@@ -2546,8 +2542,8 @@ class TestLocalSessionCLI:
         """Pressing s runs summarize_session, saves its return as the
         sidecar title, and loops back to the picker."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
-        import claude_code_transcripts as ct
+        from cad import cli
+        import cad as ct
 
         _, real_cwd, _ = _set_up_fake_home_with_session(tmp_path, monkeypatch)
 
@@ -2577,8 +2573,8 @@ class TestLocalSessionCLI:
         which guarantees identical search-via-/ UX. Asserts that
         select_entry is called twice (project step + session step)."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
-        import claude_code_transcripts as ct
+        from cad import cli
+        import cad as ct
 
         _set_up_fake_home_with_session(tmp_path, monkeypatch)
 
@@ -2612,7 +2608,7 @@ class TestOutputAutoOption:
     def test_json_output_auto_creates_subdirectory(self, tmp_path):
         """Test that json -a creates output subdirectory named after file stem."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
+        from cad import cli
 
         fixture_path = Path(__file__).parent / "sample_session.json"
 
@@ -2631,7 +2627,7 @@ class TestOutputAutoOption:
     def test_json_output_auto_uses_cwd_when_no_output(self, tmp_path, monkeypatch):
         """Test that json -a uses current directory when -o not specified."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
+        from cad import cli
         import os
 
         fixture_path = Path(__file__).parent / "sample_session.json"
@@ -2654,7 +2650,7 @@ class TestOutputAutoOption:
     def test_json_output_auto_no_browser_open(self, tmp_path, monkeypatch):
         """Test that json -a does not auto-open browser."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
+        from cad import cli
 
         fixture_path = Path(__file__).parent / "sample_session.json"
 
@@ -2665,7 +2661,7 @@ class TestOutputAutoOption:
             opened_urls.append(url)
             return True
 
-        monkeypatch.setattr("claude_code_transcripts.webbrowser.open", mock_open)
+        monkeypatch.setattr("cad.webbrowser.open", mock_open)
 
         runner = CliRunner()
         result = runner.invoke(
@@ -2680,8 +2676,8 @@ class TestOutputAutoOption:
         """`local -a` creates an output subdirectory named after the
         chosen session's stem."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
-        import claude_code_transcripts as ct
+        from cad import cli
+        import cad as ct
 
         fake_home = tmp_path / "home"
         fake_home.mkdir()
@@ -2715,7 +2711,7 @@ class TestOutputAutoOption:
     def test_web_output_auto_creates_subdirectory(self, httpx_mock, tmp_path):
         """Test that web -a creates output subdirectory named after session ID."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
+        from cad import cli
 
         # Load sample session to mock API response
         fixture_path = Path(__file__).parent / "sample_session.json"
@@ -2752,7 +2748,7 @@ class TestOutputAutoOption:
     def test_output_auto_with_jsonl_uses_stem(self, tmp_path, monkeypatch):
         """Test that -a with JSONL file uses file stem (without .jsonl extension)."""
         from click.testing import CliRunner
-        from claude_code_transcripts import cli
+        from cad import cli
 
         # Create a JSONL file
         fixture_path = Path(__file__).parent / "sample_session.jsonl"

@@ -1,4 +1,10 @@
-"""Convert Claude Code session JSON to a clean mobile-friendly HTML page with pagination."""
+"""cad — Coding Agent Driver.
+
+A single CLI for managing and resuming sessions across multiple local
+coding agents (claude, codex, pi, opencode, forge). Originally grew out
+of Simon Willison's claude-code-transcripts HTML renderer, which still
+lives inside as the `json` / `all` / `web` subcommands.
+"""
 
 import json
 import html
@@ -23,7 +29,7 @@ import questionary
 
 # Set up Jinja2 environment
 _jinja_env = Environment(
-    loader=PackageLoader("claude_code_transcripts", "templates"),
+    loader=PackageLoader("cad", "templates"),
     autoescape=True,
 )
 
@@ -165,7 +171,7 @@ def get_session_cwd(jsonl_path):
     the JSONL for the first event line that carries a ``cwd`` field. Used
     by the resume action so we ``chdir`` to the right project before exec'ing
     claude — far more reliable than decoding the lossy folder-name encoding
-    (where a folder like ``-Users-x-Code-claude-code-transcripts`` could
+    (where a folder like ``-Users-x-Code-cad`` could
     decode to several different real paths).
 
     Returns ``None`` if no event in the file has a ``cwd``. Malformed JSON
@@ -550,8 +556,8 @@ def resume_session(session):
     success.
 
     A child process can't change its parent shell's working directory; the
-    optional shell wrapper installed via ``cct shell-init`` reads
-    ``$CCT_CWD_FILE`` after the agent exits and cd's the parent shell.
+    optional shell wrapper installed via ``cad shell-init`` reads
+    ``$CAD_CWD_FILE`` after the agent exits and cd's the parent shell.
     """
     provider = session["provider"]
     cwd = session["cwd"]
@@ -566,7 +572,7 @@ def resume_session(session):
 
     click.echo(f"Resuming {provider} session {session_id} in {cwd}...")
 
-    cwd_file = os.environ.get("CCT_CWD_FILE")
+    cwd_file = os.environ.get("CAD_CWD_FILE")
     if cwd_file:
         try:
             Path(cwd_file).write_text(cwd)
@@ -578,7 +584,7 @@ def resume_session(session):
     os.execvp(cmd[0], cmd)
 
 
-# `command cct` in the wrapper skips this function so the binary runs once.
+# `command cad` in the wrapper skips this function so the binary runs once.
 # zsh and bash get separate snippets only because the conditional syntax
 # differs slightly; the mechanism is identical.
 def prompt_for_title(default=""):
@@ -888,10 +894,10 @@ def summarize_session(session):
 
 SHELL_WRAPPERS = {
     "zsh": """\
-cct() {
+cad() {
   local cwd_file
-  cwd_file=$(mktemp -t cct-cwd.XXXXXX)
-  CCT_CWD_FILE="$cwd_file" command cct "$@"
+  cwd_file=$(mktemp -t cad-cwd.XXXXXX)
+  CAD_CWD_FILE="$cwd_file" command cad "$@"
   local rc=$?
   if [[ -s "$cwd_file" ]]; then
     cd "$(< "$cwd_file")" || true
@@ -901,10 +907,10 @@ cct() {
 }
 """,
     "bash": """\
-cct() {
+cad() {
   local cwd_file
-  cwd_file=$(mktemp -t cct-cwd.XXXXXX)
-  CCT_CWD_FILE="$cwd_file" command cct "$@"
+  cwd_file=$(mktemp -t cad-cwd.XXXXXX)
+  CAD_CWD_FILE="$cwd_file" command cad "$@"
   local rc=$?
   if [ -s "$cwd_file" ]; then
     cd "$(cat "$cwd_file")" || true
@@ -916,13 +922,13 @@ cct() {
 }
 
 
-TEMP_OUTPUT_PARENT = "claude-code-transcripts"
+TEMP_OUTPUT_PARENT = "cad"
 TEMP_OUTPUT_KEEP = 20
 
 
 def _temp_output_dir(stem):
     """Return a per-session temp output dir under a single shared parent
-    (``$TMPDIR/claude-code-transcripts/``). Old sibling dirs beyond
+    (``$TMPDIR/cad/``). Old sibling dirs beyond
     :data:`TEMP_OUTPUT_KEEP` are pruned so the user's tmp folder doesn't
     accumulate transcripts indefinitely between system-level temp cleanups.
     """
@@ -1296,13 +1302,29 @@ def find_forge_sessions(db_path=None):
     return out
 
 
+def _migrate_legacy_sidecar_dir():
+    """One-time best-effort: rename ~/.cct → ~/.cad so users carry their
+    title and cwd overrides across the tool rename. Idempotent — does
+    nothing if .cad already exists. Silent on permission errors; the user
+    can ``mv`` manually in that case.
+    """
+    old = Path.home() / ".cct"
+    new = Path.home() / ".cad"
+    if old.is_dir() and not new.exists():
+        try:
+            shutil.move(str(old), str(new))
+        except OSError:
+            pass
+
+
 def _titles_file():
-    """Sidecar storage for cct's title overrides — set via the picker's `r`
+    """Sidecar storage for cad's title overrides — set via the picker's `r`
     (rename) or `s` (summarize) actions. Keyed by ``<provider>:<session_id>``
     so it's uniform across all agents and never touches the agent's own
     storage. JSON for trivial hand-inspection.
     """
-    return Path.home() / ".cct" / "titles.json"
+    _migrate_legacy_sidecar_dir()
+    return Path.home() / ".cad" / "titles.json"
 
 
 def _load_titles():
@@ -1334,12 +1356,13 @@ def get_title_override(session):
 
 
 def _cwd_overrides_file():
-    """Sidecar storage for cct's per-session cwd overrides — set via the
+    """Sidecar storage for cad's per-session cwd overrides — set via the
     picker's ``m`` (move) action. Lets the user reassign which project a
     session belongs to without modifying the agent's own session files.
     Same key shape as the titles sidecar.
     """
-    return Path.home() / ".cct" / "cwd-overrides.json"
+    _migrate_legacy_sidecar_dir()
+    return Path.home() / ".cad" / "cwd-overrides.json"
 
 
 def _load_cwd_overrides():
@@ -2903,24 +2926,26 @@ def generate_html(json_path, output_dir, github_repo=None):
 
 
 @click.group(cls=DefaultGroup, default="local", default_if_no_args=True)
-@click.version_option(None, "-v", "--version", package_name="claude-code-transcripts")
+@click.version_option(None, "-v", "--version", package_name="cad")
 def cli():
-    """Convert Claude Code session JSON to mobile-friendly HTML pages."""
+    """cad — Coding Agent Driver. Manage sessions across claude, codex,
+    pi, opencode, and forge from one picker, or render Claude Code
+    sessions to HTML."""
     pass
 
 
 @cli.command("shell-init")
 @click.argument("shell", type=click.Choice(sorted(SHELL_WRAPPERS.keys())))
 def shell_init_cmd(shell):
-    """Print a shell wrapper function for `cct`.
+    """Print a shell wrapper function for `cad`.
 
     Install once by adding this line to your rc file::
 
-        eval "$(cct shell-init zsh)"   # or bash
+        eval "$(cad shell-init zsh)"   # or bash
 
     The wrapper makes Enter (resume) leave your shell inside the project
-    directory after claude exits. Without it, you stay in whichever
-    directory you ran `cct` from — a Unix child process can't cd its
+    directory after the agent exits. Without it, you stay in whichever
+    directory you ran `cad` from — a Unix child process can't cd its
     parent shell.
     """
     click.echo(SHELL_WRAPPERS[shell], nl=False)
