@@ -185,6 +185,65 @@ def get_session_cwd(jsonl_path):
     return None
 
 
+def get_claude_session_metadata(filepath, max_summary_length=200):
+    """Single-pass scan of a claude JSONL that captures both the first
+    user prompt (the implicit title) and the last user-assigned name from
+    ``/rename`` (a ``{"type":"custom-title","customTitle":...}`` event).
+
+    Returns ``{"summary": str, "name": str|None}``. The summary follows
+    the same rules as :func:`_get_jsonl_summary` — ``type:summary`` events
+    win, otherwise the first non-meta user message. The name is whichever
+    custom-title event came last in the file: rename can happen multiple
+    times in one session and ``claude --resume <name>`` resolves to the
+    current value.
+
+    A single pass is cheaper than running two scans, but only invoked
+    after the user picks a project — the project-picker layer doesn't
+    need names or summaries.
+    """
+    summary = None
+    name = None
+    try:
+        with open(filepath, "r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(d, dict):
+                    continue
+                t = d.get("type")
+                if t == "custom-title":
+                    new_name = d.get("customTitle")
+                    if new_name:
+                        name = new_name
+                    continue
+                if summary is not None:
+                    # Once we have a summary we don't need to inspect more
+                    # for that purpose, but keep walking in case a later
+                    # custom-title event updates the name.
+                    continue
+                if t == "summary" and d.get("summary"):
+                    summary = d["summary"]
+                elif (
+                    t == "user"
+                    and not d.get("isMeta")
+                    and d.get("message", {}).get("content")
+                ):
+                    text = extract_text_from_content(d["message"]["content"])
+                    if text and not text.startswith("<"):
+                        summary = text
+    except OSError:
+        pass
+
+    if summary is None:
+        summary = "(no summary)"
+    elif len(summary) > max_summary_length:
+        summary = summary[: max_summary_length - 3] + "..."
+
+    return {"summary": summary, "name": name}
+
+
 def find_local_sessions(folder, limit=10):
     """Find recent JSONL session files in the given folder.
 
@@ -557,6 +616,7 @@ def find_claude_sessions(projects_folder):
                 "mtime": st.st_mtime,
                 "size": st.st_size,
                 "summary": None,
+                "name": None,
                 "display": None,
             }
         )
@@ -603,6 +663,7 @@ def find_codex_sessions(root=None):
                 "mtime": st.st_mtime,
                 "size": st.st_size,
                 "summary": None,
+                "name": None,
                 "display": None,
             }
         )
@@ -680,6 +741,8 @@ def find_pi_sessions(root=None):
                 "mtime": st.st_mtime,
                 "size": st.st_size,
                 "summary": None,
+                # Pi persists a user-given --name in the session_meta line.
+                "name": meta.get("name") or None,
                 "display": None,
             }
         )
@@ -768,6 +831,7 @@ def find_opencode_sessions(db_path=None):
                         # opencode already records a title; carry it through
                         # so load_session_summary doesn't need to re-read.
                         "summary": title or "(no title)",
+                        "name": None,
                         "display": None,
                     }
                 )
@@ -834,6 +898,7 @@ def find_forge_sessions(db_path=None):
                         "mtime": mtime,
                         "size": 0,
                         "summary": title or "(no title)",
+                        "name": None,
                         "display": None,
                     }
                 )
@@ -856,7 +921,11 @@ def load_session_summary(session):
         return
     if session["summary"] is None:
         if session["provider"] == "claude":
-            session["summary"] = get_session_summary(session["filepath"])
+            # Single pass picks up summary AND any user-set /rename name.
+            meta = get_claude_session_metadata(session["filepath"])
+            session["summary"] = meta["summary"]
+            if not session.get("name"):
+                session["name"] = meta["name"]
         elif session["provider"] == "codex":
             session["summary"] = get_codex_summary(session["filepath"])
         elif session["provider"] == "pi":
@@ -867,14 +936,16 @@ def load_session_summary(session):
     mtime = datetime.fromtimestamp(session["mtime"])
     date_str = mtime.strftime("%Y-%m-%d %H:%M")
     size_kb = session["size"] / 1024
-    # Collapse newlines/tabs to a single space so the picker stays one row
-    # per session — but no length cap, since the user wants the full prompt
-    # visible (terminal handles horizontal overflow).
     summary_one_line = re.sub(r"\s+", " ", session["summary"]).strip()
-    # Provider as a path-like prefix is more scannable than a bracketed badge.
-    session["display"] = (
-        f"{date_str}  {size_kb:5.0f} KB  " f"{session['provider']}/ {summary_one_line}"
-    )
+    # User-named sessions (claude /rename, pi --name) get a prominent
+    # "provider/Name" prefix separated from the implicit prompt by an
+    # em-dash. Unnamed rows keep the trailing slash so layout aligns.
+    name = session.get("name")
+    if name:
+        prefix = f"{session['provider']}/{name} — "
+    else:
+        prefix = f"{session['provider']}/ "
+    session["display"] = f"{date_str}  {size_kb:5.0f} KB  {prefix}{summary_one_line}"
 
 
 # Single-letter badge codes for the project-row provider counts. Adding a

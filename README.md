@@ -72,6 +72,8 @@ The generated output includes:
 
 Sessions are grouped by their recorded working directory (cwd), so sessions from any agent in the same project share one entry. Each row's badge shows per-provider counts: `(6c+5o+1f)` = 6 claude + 5 opencode + 1 forge.
 
+User-named sessions (claude `/rename`, pi `--name`) are surfaced in the picker as `claude/MyName — <prompt>` so they're easy to spot.
+
 Run with no arguments to launch a two-step picker — first choose a project, then a session within it:
 
 ```bash

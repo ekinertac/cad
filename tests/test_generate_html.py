@@ -34,6 +34,8 @@ from claude_code_transcripts import (
     find_forge_sessions,
     _prune_temp_outputs,
     get_session_cwd,
+    get_claude_session_metadata,
+    load_session_summary,
 )
 
 
@@ -1876,6 +1878,85 @@ class TestGetSessionCwd:
             '{"type":"user","cwd":"/recovered","message":{"content":"hi"}}\n'
         )
         assert get_session_cwd(f) == "/recovered"
+
+
+class TestClaudeSessionMetadata:
+    """Single-pass extractor that pulls both the first-prompt summary and
+    the most recent /rename name from a claude JSONL."""
+
+    def test_no_custom_title_returns_none_name(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            '{"type":"summary","summary":"Some prompt"}\n'
+            '{"type":"user","message":{"content":"hi"}}\n'
+        )
+        meta = get_claude_session_metadata(f)
+        assert meta["name"] is None
+        assert meta["summary"] == "Some prompt"
+
+    def test_extracts_custom_title(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            '{"type":"summary","summary":"prompt"}\n'
+            '{"type":"user","message":{"content":"hi"}}\n'
+            '{"type":"custom-title","customTitle":"MyName"}\n'
+        )
+        assert get_claude_session_metadata(f)["name"] == "MyName"
+
+    def test_keeps_last_custom_title_when_renamed_multiple_times(self, tmp_path):
+        """Claude lets you /rename more than once; the resume picker uses
+        whichever name was set last."""
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            '{"type":"summary","summary":"prompt"}\n'
+            '{"type":"custom-title","customTitle":"First"}\n'
+            '{"type":"user","message":{"content":"hi"}}\n'
+            '{"type":"custom-title","customTitle":"Second"}\n'
+            '{"type":"custom-title","customTitle":"Third"}\n'
+        )
+        assert get_claude_session_metadata(f)["name"] == "Third"
+
+    def test_named_sessions_show_name_in_display(self, tmp_path):
+        """The picker row should surface the user-given name as
+        provider/Name — prompt instead of provider/ prompt."""
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            '{"type":"summary","summary":"build the thing"}\n'
+            '{"type":"custom-title","customTitle":"BuildIt"}\n'
+        )
+        sess = {
+            "provider": "claude",
+            "session_id": "x",
+            "filepath": f,
+            "cwd": "/x",
+            "mtime": 1700000000.0,
+            "size": 1234,
+            "summary": None,
+            "name": None,
+            "display": None,
+        }
+        load_session_summary(sess)
+        assert sess["name"] == "BuildIt"
+        assert "claude/BuildIt — build the thing" in sess["display"]
+
+    def test_unnamed_sessions_show_no_name(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        f.write_text('{"type":"summary","summary":"prompt"}\n')
+        sess = {
+            "provider": "claude",
+            "session_id": "x",
+            "filepath": f,
+            "cwd": "/x",
+            "mtime": 1700000000.0,
+            "size": 1234,
+            "summary": None,
+            "name": None,
+            "display": None,
+        }
+        load_session_summary(sess)
+        # Old unnamed format: "claude/ <prompt>"
+        assert "claude/ prompt" in sess["display"]
+        assert "—" not in sess["display"]
 
 
 class TestPruneTempOutputs:
