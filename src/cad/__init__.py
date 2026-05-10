@@ -628,15 +628,20 @@ def prompt_confirm(message, default=False):
     return text in ("y", "yes")
 
 
-def prompt_for_cwd(default=""):
-    """Prompt for a session's new project directory. Resolves ``~``,
-    validates the path exists and is a directory. Returns the absolute
-    path string, or the sentinel ``""`` to mean "remove existing
-    override", or ``None`` if cancelled.
+def prompt_for_cwd(default="", must_exist=True, label="New cwd"):
+    """Prompt for a directory path. Resolves ``~``. Loops until valid or
+    cancelled so any error stays adjacent to the next prompt instead of
+    being buried above a freshly-rendered picker.
 
-    On invalid input we keep the user in the prompt instead of bouncing
-    back to the picker — otherwise the error line ends up buried just
-    above a freshly-rendered session list.
+    ``must_exist=True`` (default): path has to be an existing directory.
+    Used by per-session ``m`` where we just want to point at a known dir.
+
+    ``must_exist=False``: path must NOT exist (we'll create it via the
+    caller's mv) and its parent must exist. Used by project-level ``r``
+    where cad does the full rename including the user-side mv.
+
+    Returns the absolute path string, ``""`` to clear an existing
+    override, or ``None`` if cancelled.
     """
     from prompt_toolkit import prompt as _ptk_prompt
     from prompt_toolkit.formatted_text import FormattedText
@@ -645,7 +650,7 @@ def prompt_for_cwd(default=""):
     while True:
         try:
             text = _ptk_prompt(
-                FormattedText([("class:prompt", "New cwd (empty to clear): ")]),
+                FormattedText([("class:prompt", f"{label} (empty to clear): ")]),
                 default=current,
             )
         except (KeyboardInterrupt, EOFError):
@@ -654,11 +659,17 @@ def prompt_for_cwd(default=""):
         if not text:
             return ""
         path = Path(text).expanduser().resolve()
-        if path.is_dir():
-            return str(path)
-        click.echo(f"Not a directory: {path}", err=True)
-        # Pre-fill the next prompt with what they typed so they can edit
-        # the path (fix a typo) instead of retyping it.
+        if must_exist:
+            if path.is_dir():
+                return str(path)
+            click.echo(f"Not a directory: {path}", err=True)
+        else:
+            if path.exists():
+                click.echo(f"Already exists — would clobber: {path}", err=True)
+            elif not path.parent.exists():
+                click.echo(f"Parent directory doesn't exist: {path.parent}", err=True)
+            else:
+                return str(path)
         current = text
 
 
@@ -1448,6 +1459,122 @@ def _apply_cwd_override(session):
     override = get_cwd_override(session["provider"], session["session_id"])
     if override:
         session["cwd"] = override
+
+
+def _claude_encode_path(path):
+    """Replicate Claude Code's directory-encoding scheme. Both ``/`` and
+    ``.`` are replaced with ``-`` — e.g. ``/Users/x/Code/humbl.ai`` becomes
+    ``-Users-x-Code-humbl-ai``. Verified against folders on disk."""
+    return re.sub(r"[/.]", "-", str(path))
+
+
+# State that claude maintains in parallel directories alongside projects/.
+# Each is keyed by the same encoded path. We move all that exist for a
+# given project — leaving any behind would let claude see stale references.
+_CLAUDE_STATE_DIRS = ("projects", "file-history", "todos", "shell-snapshots")
+
+
+def migrate_claude_project(old_cwd, new_cwd, backup_root=None, dry_run=False):
+    """Move a claude project's on-disk state from one cwd to another.
+
+    1. Backup the four ``~/.claude/<dir>/<old_enc>/`` trees (where they
+       exist) into ``backup_root`` so the user has a one-command undo.
+    2. Move each ``~/.claude/<dir>/<old_enc>/`` to ``<new_enc>/``. If the
+       destination already exists, merge file-by-file (existing files at
+       the destination win — we never overwrite).
+    3. Rewrite the ``cwd`` field in every JSONL line under the new
+       ``projects/<new_enc>/`` directory.
+
+    Mechanism is from https://www.vincentschmalbach.com/migrate-claude-code-sessions-to-a-new-computer/
+    cross-checked against claude's actual filter behaviour (claude --resume
+    filters its picker by cwd inside the JSONL, not by folder name).
+
+    Returns a dict::
+
+        {
+            "moved_dirs":      [(old_path, new_path), ...],
+            "rewritten_files": [Path, ...],
+            "backup_dir":      Path | None,
+            "skipped":         ["projects exists at target", ...],
+        }
+    """
+    old_enc = _claude_encode_path(old_cwd)
+    new_enc = _claude_encode_path(new_cwd)
+    if old_enc == new_enc:
+        raise click.ClickException(
+            "Old and new cwd encode to the same path — nothing to migrate."
+        )
+
+    claude_root = Path.home() / ".claude"
+    result = {
+        "moved_dirs": [],
+        "rewritten_files": [],
+        "backup_dir": None,
+        "skipped": [],
+    }
+
+    # Phase 1 — backup. Only copy what actually exists; don't create empty
+    # backup trees for state dirs that don't apply to this project.
+    if backup_root and not dry_run:
+        ts = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
+        backup_dir = backup_root / f"claude-migrate-{ts}"
+        for base in _CLAUDE_STATE_DIRS:
+            src = claude_root / base / old_enc
+            if src.exists():
+                dst = backup_dir / base / old_enc
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(src, dst)
+        result["backup_dir"] = backup_dir if backup_dir.exists() else None
+
+    # Phase 2 — move each state dir if it exists.
+    for base in _CLAUDE_STATE_DIRS:
+        src = claude_root / base / old_enc
+        dst = claude_root / base / new_enc
+        if not src.exists():
+            continue
+        if dst.exists():
+            # Merge: move individual entries, skipping any name collisions
+            # so we never clobber an existing file in the destination.
+            for entry in src.iterdir():
+                target = dst / entry.name
+                if target.exists():
+                    result["skipped"].append(f"{base}/{new_enc}/{entry.name} exists")
+                    continue
+                if not dry_run:
+                    shutil.move(str(entry), str(target))
+            # Best-effort cleanup of the (now hopefully empty) source dir.
+            try:
+                if not dry_run:
+                    src.rmdir()
+            except OSError:
+                pass
+            result["moved_dirs"].append((src, dst))
+        else:
+            if not dry_run:
+                shutil.move(str(src), str(dst))
+            result["moved_dirs"].append((src, dst))
+
+    # Phase 3 — rewrite cwd inside every JSONL under the new projects dir.
+    new_project_dir = claude_root / "projects" / new_enc
+    if new_project_dir.exists():
+        old_cwd_str = str(old_cwd)
+        new_cwd_str = str(new_cwd)
+        for jsonl in new_project_dir.glob("*.jsonl"):
+            if dry_run:
+                result["rewritten_files"].append(jsonl)
+                continue
+            # Preserve mtime — the session content didn't semantically
+            # change, only its location label. Lets cad's sort order
+            # remain stable across a migration.
+            stat = jsonl.stat()
+            text = jsonl.read_text(encoding="utf-8")
+            new_text = text.replace(f'"cwd":"{old_cwd_str}"', f'"cwd":"{new_cwd_str}"')
+            if new_text != text:
+                jsonl.write_text(new_text, encoding="utf-8")
+                os.utime(jsonl, (stat.st_atime, stat.st_mtime))
+                result["rewritten_files"].append(jsonl)
+
+    return result
 
 
 def load_session_summary(session):
@@ -3084,47 +3211,119 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
             project_idx = 0
 
         if project_action == "rename":
-            # Bulk cwd-override for every session in this project. Reuses
-            # the same prompt + validation as the per-session `m` action.
-            current = selected_project["cwd"] or ""
-            new_cwd = prompt_for_cwd(default=current)
-            if new_cwd is None:  # cancel
-                continue
+            # Full project rename. cad handles every step so the user
+            # never has to do a manual `mv` and then track it across
+            # claude state dirs. Sequence: prompt → confirm → backup →
+            # mv user folder → migrate claude state dirs → rewrite cwd
+            # in JSONLs → clear sidecar overrides (no longer needed).
             project_sessions = selected_project["sessions"]
             n = len(project_sessions)
-            # Guardrail: the blast radius is N sessions in one keystroke,
-            # and `r` is one key from `Enter`. Always confirm before
-            # firing — covers both real renames and the "empty input
-            # clears overrides" undo path.
-            if new_cwd:
-                msg = (
-                    f"Move {n} session(s) in {selected_project['name']} "
-                    f"to {new_cwd}?"
+            old_cwd = selected_project["cwd"]
+
+            if not old_cwd:
+                click.echo(
+                    "Rename not supported for the virtual Global Sessions entry.",
+                    err=True,
                 )
-            else:
-                msg = (
-                    f"Clear cwd overrides for {n} session(s) in "
-                    f"{selected_project['name']}?"
+                continue
+
+            new_cwd = prompt_for_cwd(
+                default=old_cwd, must_exist=False, label="Rename to"
+            )
+            if new_cwd is None:
+                continue  # Ctrl-C / EOF
+            if not new_cwd:
+                click.echo("Empty path — cancelled (no override changes made).")
+                continue
+            if new_cwd == old_cwd:
+                click.echo("Same path — nothing to do.")
+                continue
+
+            # Spell out exactly what's about to happen so the user can
+            # bail on the last yes/no rather than discovering surprises.
+            providers_in_project = sorted({s["provider"] for s in project_sessions})
+            non_claude = [p for p in providers_in_project if p != "claude"]
+            click.echo()
+            click.echo("About to rename project:")
+            click.echo(f"  fs mv:    {old_cwd}  →  {new_cwd}")
+            click.echo(f"  claude:   migrate state dirs, rewrite cwd in {n} JSONL(s)")
+            if non_claude:
+                click.echo(
+                    f"  others:   {', '.join(non_claude)} sessions stay where they are"
                 )
-            if not prompt_confirm(msg):
+                click.echo(
+                    "            (cad's sidecar override will point them at the new cwd)"
+                )
+            click.echo(f"  backup:   ~/.cad/agent-backups/claude-migrate-<ts>/")
+            if not prompt_confirm("Proceed?"):
                 click.echo("Cancelled.")
                 continue
-            for s in project_sessions:
-                save_cwd_override(s["provider"], s["session_id"], new_cwd)
-            verb = "Moved" if new_cwd else "Cleared override for"
-            click.echo(
-                f"{verb} {n} session(s) in {selected_project['name']} "
-                f"to {new_cwd or '(no override)'}"
-            )
-            # Re-discover so the picker reflects the new grouping.
-            projects = find_local_projects()
-            # Try to keep the cursor on the renamed project's new home if it
-            # still appears (it will when new_cwd != ""), otherwise reset.
-            if new_cwd:
-                project_idx = next(
-                    (i for i, p in enumerate(projects) if p["cwd"] == new_cwd),
-                    0,
+
+            try:
+                # Phase 1: backup + migrate claude on-disk state. Do this
+                # before the user-side mv so backups live in ~/.cad/ even
+                # if the user-side mv fails.
+                migration = migrate_claude_project(
+                    old_cwd,
+                    new_cwd,
+                    backup_root=Path.home() / ".cad" / "agent-backups",
                 )
+
+                # Phase 2: mv the user's actual project directory.
+                old_path = Path(old_cwd)
+                new_path = Path(new_cwd)
+                if old_path.exists():
+                    shutil.move(str(old_path), str(new_path))
+                elif not new_path.exists():
+                    # User-side directory was already gone (e.g., they
+                    # nuked it during testing). Warn but don't fail —
+                    # the claude state migration may still be useful.
+                    click.echo(
+                        f"Note: {old_path} didn't exist; skipped fs mv.",
+                        err=True,
+                    )
+
+                # Phase 3: for non-claude providers, fall back to the
+                # sidecar override (their storage isn't path-encoded so
+                # there's nothing to move on disk; cad just needs to
+                # know the new cwd).
+                for s in project_sessions:
+                    if s["provider"] == "claude":
+                        # Claude no longer needs the sidecar — its JSONLs
+                        # now record the new cwd. Clear any stale
+                        # override so source-of-truth is the JSONL.
+                        save_cwd_override(s["provider"], s["session_id"], "")
+                    else:
+                        save_cwd_override(s["provider"], s["session_id"], new_cwd)
+
+                click.echo()
+                click.echo(f"Renamed {selected_project['name']} → {Path(new_cwd).name}")
+                click.echo(f"  claude state dirs moved: {len(migration['moved_dirs'])}")
+                click.echo(
+                    f"  JSONL cwds rewritten:    {len(migration['rewritten_files'])}"
+                )
+                if migration["backup_dir"]:
+                    click.echo(f"  backup:                  {migration['backup_dir']}")
+                if migration["skipped"]:
+                    click.echo("  skipped (collisions):")
+                    for s in migration["skipped"]:
+                        click.echo(f"    {s}")
+            except (OSError, click.ClickException) as e:
+                click.echo(f"Migration failed: {e}", err=True)
+                click.echo(
+                    "Backup (if any) is at ~/.cad/agent-backups/. "
+                    "Inspect ~/.claude/projects/ and the new path before retrying.",
+                    err=True,
+                )
+                continue
+
+            # Re-discover so the picker reflects the new state, then jump
+            # cursor to the new project.
+            projects = find_local_projects()
+            project_idx = next(
+                (i for i, p in enumerate(projects) if p["cwd"] == new_cwd),
+                0,
+            )
             continue
 
         sessions = selected_project["sessions"]

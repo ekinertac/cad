@@ -26,7 +26,7 @@ Optional: `eval "$(cad shell-init zsh)"` in your rc file makes Enter (resume) le
 
 Run `cad` with no arguments. You get a two-step picker.
 
-**Step 1 — projects.** Every directory where you have any agent sessions, sorted by most-recent activity. Provider badge per row: `(6c+5o+1f)` = 6 claude + 5 opencode + 1 forge. Sessions from any agent that share a working directory share an entry. Press **`r`** to bulk-rename a project — useful when you've `mv`'d the folder on disk and want every session in it to follow.
+**Step 1 — projects.** Every directory where you have any agent sessions, sorted by most-recent activity. Provider badge per row: `(6c+5o+1f)` = 6 claude + 5 opencode + 1 forge. Sessions from any agent that share a working directory share an entry. Press **`r`** to rename a project end-to-end: `mv` the user folder, move claude's `~/.claude/{projects,file-history,todos,shell-snapshots}/` state, rewrite the embedded `cwd` in every JSONL, and back everything up to `~/.cad/agent-backups/` so a mistake is one `cp -R` away from being undone. *Do not run while the project's live claude session is open* — it moves files claude is actively writing.
 
 **Step 2 — sessions in the chosen project.** Each row shows date, size, provider prefix, and a title (the first user prompt, your `/rename` text, or a cad-set override).
 

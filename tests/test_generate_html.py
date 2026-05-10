@@ -1780,6 +1780,104 @@ class TestAtomicSidecarWrites:
         assert not tmp.exists()
 
 
+class TestMigrateClaudeProject:
+    """Direct tests for the migration helper: encoding, dir moves, JSONL
+    rewrites, backups."""
+
+    def test_encoding_replaces_slash_and_dot(self):
+        import cad as ct
+
+        assert (
+            ct._claude_encode_path("/Users/x/Code/humbl.ai") == "-Users-x-Code-humbl-ai"
+        )
+        assert (
+            ct._claude_encode_path("/Users/x/Code/claude-code-transcripts")
+            == "-Users-x-Code-claude-code-transcripts"
+        )
+
+    def test_migration_moves_projects_dir_and_rewrites_cwd(self, tmp_path, monkeypatch):
+        import cad as ct
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        old_cwd = "/Users/x/Code/old"
+        new_cwd = "/Users/x/Code/new"
+        old_enc = ct._claude_encode_path(old_cwd)
+        new_enc = ct._claude_encode_path(new_cwd)
+
+        proj_old = tmp_path / ".claude" / "projects" / old_enc
+        proj_old.mkdir(parents=True)
+        (proj_old / "s1.jsonl").write_text(
+            f'{{"type":"user","cwd":"{old_cwd}","message":{{"content":"hi"}}}}\n'
+            f'{{"type":"assistant","cwd":"{old_cwd}","message":{{"content":"hello"}}}}\n'
+        )
+
+        result = ct.migrate_claude_project(
+            old_cwd, new_cwd, backup_root=tmp_path / "backups"
+        )
+
+        proj_new = tmp_path / ".claude" / "projects" / new_enc
+        assert proj_new.exists()
+        assert not proj_old.exists()
+        text = (proj_new / "s1.jsonl").read_text()
+        assert f'"cwd":"{new_cwd}"' in text
+        assert f'"cwd":"{old_cwd}"' not in text
+        assert (tmp_path / "backups").exists()
+        assert result["backup_dir"] is not None
+        assert len(result["rewritten_files"]) == 1
+
+    def test_migration_also_moves_auxiliary_state_dirs(self, tmp_path, monkeypatch):
+        """file-history/, todos/, shell-snapshots/ are moved if they
+        exist for the project. Absent ones don't trigger errors."""
+        import cad as ct
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        old_enc = ct._claude_encode_path("/Users/x/Code/old")
+        new_enc = ct._claude_encode_path("/Users/x/Code/new")
+
+        # Set up two of the four state dirs only — the migration should
+        # move what exists and ignore the rest.
+        for base in ("projects", "file-history"):
+            d = tmp_path / ".claude" / base / old_enc
+            d.mkdir(parents=True)
+            (d / "marker.txt").write_text(base)
+
+        ct.migrate_claude_project(
+            "/Users/x/Code/old", "/Users/x/Code/new", backup_root=None
+        )
+
+        for base in ("projects", "file-history"):
+            assert (
+                tmp_path / ".claude" / base / new_enc / "marker.txt"
+            ).read_text() == base
+            assert not (tmp_path / ".claude" / base / old_enc).exists()
+
+    def test_migration_merge_skips_existing_destinations(self, tmp_path, monkeypatch):
+        """If a session by the same name already exists at the target,
+        skip it instead of clobbering the user's data."""
+        import cad as ct
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        old_enc = ct._claude_encode_path("/Users/x/Code/old")
+        new_enc = ct._claude_encode_path("/Users/x/Code/new")
+
+        src = tmp_path / ".claude" / "projects" / old_enc
+        src.mkdir(parents=True)
+        (src / "shared.jsonl").write_text("OLD")
+        dst = tmp_path / ".claude" / "projects" / new_enc
+        dst.mkdir(parents=True)
+        (dst / "shared.jsonl").write_text("DESTINATION-WINS")
+
+        result = ct.migrate_claude_project(
+            "/Users/x/Code/old", "/Users/x/Code/new", backup_root=None
+        )
+
+        # Destination's file is untouched (we never clobber)
+        assert (dst / "shared.jsonl").read_text() == "DESTINATION-WINS"
+        # Skipped item reported
+        assert any("shared.jsonl" in s for s in result["skipped"])
+
+
 class TestCwdOverrideSidecar:
     """Cwd overrides live at ~/.cad/cwd-overrides.json. Discovery swaps
     them in before grouping, so a moved session lands in the new project.
@@ -2542,10 +2640,9 @@ class TestLocalSessionCLI:
         assert call_count["n"] == 3, call_count
         assert "No project selected" in result.output
 
-    def test_project_rename_bulk_moves_all_sessions(self, tmp_path, monkeypatch):
-        """Pressing r on the project picker writes a cwd override for every
-        session in that project — for when you've renamed the folder on
-        disk and want all sessions to follow in one keystroke."""
+    def test_project_rename_full_migration(self, tmp_path, monkeypatch):
+        """The full project rename: cad does fs mv + claude state move +
+        cwd rewrite + clears sidecar overrides after success."""
         from click.testing import CliRunner
         from cad import cli
         import cad as ct
@@ -2554,20 +2651,24 @@ class TestLocalSessionCLI:
         fake_home.mkdir()
         monkeypatch.setattr(Path, "home", lambda: fake_home)
 
-        proj_dir = fake_home / ".claude" / "projects" / "test-project"
-        proj_dir.mkdir(parents=True)
-        old_cwd = "/Users/x/Code/old-name"
-        session_ids = []
-        for i in range(3):
-            sid = f"sess-{i}"
-            session_ids.append(sid)
-            (proj_dir / f"{sid}.jsonl").write_text(
-                '{"type":"summary","summary":"x"}\n'
-                f'{{"type":"user","cwd":"{old_cwd}","message":{{"content":"hi"}}}}\n'
-            )
+        # Simulate a real project on the user's disk and its matching
+        # claude state under fake_home/.claude/projects.
+        old_user_dir = tmp_path / "Code" / "old-project"
+        old_user_dir.mkdir(parents=True)
+        new_user_dir = tmp_path / "Code" / "renamed-project"
+        # Important: new_user_dir does NOT exist yet — cad will create it
+        # via the mv. We just make sure its parent exists.
+        assert not new_user_dir.exists()
 
-        new_cwd = tmp_path / "renamed-target"
-        new_cwd.mkdir()
+        old_enc = ct._claude_encode_path(old_user_dir)
+        new_enc = ct._claude_encode_path(new_user_dir)
+        claude_proj = fake_home / ".claude" / "projects" / old_enc
+        claude_proj.mkdir(parents=True)
+        sid = "abc-123"
+        (claude_proj / f"{sid}.jsonl").write_text(
+            '{"type":"summary","summary":"x"}\n'
+            f'{{"type":"user","cwd":"{old_user_dir}","message":{{"content":"hi"}}}}\n'
+        )
 
         call_count = {"n": 0}
 
@@ -2576,27 +2677,46 @@ class TestLocalSessionCLI:
         ):
             call_count["n"] += 1
             if call_count["n"] == 1:
-                # Project picker — trigger rename on first project.
                 return entries[0], "rename"
-            # Second call: project picker again (after rename), cancel out.
             return None
 
         monkeypatch.setattr(ct, "select_entry", fake_select_entry)
-        monkeypatch.setattr(ct, "prompt_for_cwd", lambda default="": str(new_cwd))
-        # Always say "yes" to the confirmation guardrail in tests.
-        monkeypatch.setattr(ct, "prompt_confirm", lambda message, default=False: True)
+        monkeypatch.setattr(
+            ct,
+            "prompt_for_cwd",
+            lambda default="", must_exist=True, label="New cwd": str(new_user_dir),
+        )
+        monkeypatch.setattr(ct, "prompt_confirm", lambda m, default=False: True)
 
         result = CliRunner().invoke(cli, ["local"])
         assert result.exit_code == 0, result.output
 
-        for sid in session_ids:
-            assert ct.get_cwd_override("claude", sid) == str(new_cwd.resolve())
+        # User-side dir was moved
+        assert not old_user_dir.exists()
+        assert new_user_dir.exists()
+
+        # claude state dir was moved
+        assert not (fake_home / ".claude" / "projects" / old_enc).exists()
+        new_claude_dir = fake_home / ".claude" / "projects" / new_enc
+        assert new_claude_dir.exists()
+
+        # cwd inside the JSONL was rewritten
+        jsonl_content = (new_claude_dir / f"{sid}.jsonl").read_text()
+        assert str(new_user_dir) in jsonl_content
+        assert str(old_user_dir) not in jsonl_content
+
+        # Claude sidecar override was cleared (source-of-truth is the JSONL now)
+        assert ct.get_cwd_override("claude", sid) is None
+
+        # Backup exists under ~/.cad/agent-backups/
+        backups = fake_home / ".cad" / "agent-backups"
+        assert backups.exists()
+        assert any(backups.iterdir()), "expected at least one backup dir"
 
     def test_project_rename_aborts_when_user_declines_confirmation(
         self, tmp_path, monkeypatch
     ):
-        """If the user types N at the confirmation prompt, no overrides
-        get saved even though prompt_for_cwd returned a valid path."""
+        """If the user types N at the confirm, nothing on disk is touched."""
         from click.testing import CliRunner
         from cad import cli
         import cad as ct
@@ -2605,16 +2725,18 @@ class TestLocalSessionCLI:
         fake_home.mkdir()
         monkeypatch.setattr(Path, "home", lambda: fake_home)
 
-        proj_dir = fake_home / ".claude" / "projects" / "test-project"
-        proj_dir.mkdir(parents=True)
-        (proj_dir / "abc-123.jsonl").write_text(
+        old_user_dir = tmp_path / "Code" / "old-project"
+        old_user_dir.mkdir(parents=True)
+        new_user_dir = tmp_path / "Code" / "renamed-project"
+
+        old_enc = ct._claude_encode_path(old_user_dir)
+        claude_proj = fake_home / ".claude" / "projects" / old_enc
+        claude_proj.mkdir(parents=True)
+        (claude_proj / "abc-123.jsonl").write_text(
             '{"type":"summary","summary":"x"}\n'
-            '{"type":"user","cwd":"/Users/x/Code/foo",'
+            f'{{"type":"user","cwd":"{old_user_dir}",'
             '"message":{"content":"hi"}}\n'
         )
-
-        new_cwd = tmp_path / "new"
-        new_cwd.mkdir()
 
         call_count = {"n": 0}
 
@@ -2627,15 +2749,20 @@ class TestLocalSessionCLI:
             return None
 
         monkeypatch.setattr(ct, "select_entry", fake_select_entry)
-        monkeypatch.setattr(ct, "prompt_for_cwd", lambda default="": str(new_cwd))
-        # User says NO to the confirmation.
-        monkeypatch.setattr(ct, "prompt_confirm", lambda message, default=False: False)
+        monkeypatch.setattr(
+            ct,
+            "prompt_for_cwd",
+            lambda default="", must_exist=True, label="New cwd": str(new_user_dir),
+        )
+        monkeypatch.setattr(ct, "prompt_confirm", lambda m, default=False: False)
 
         result = CliRunner().invoke(cli, ["local"])
         assert result.exit_code == 0, result.output
         assert "Cancelled" in result.output
-        # No override saved.
-        assert ct.get_cwd_override("claude", "abc-123") is None
+        # Nothing moved
+        assert old_user_dir.exists()
+        assert not new_user_dir.exists()
+        assert (fake_home / ".claude" / "projects" / old_enc).exists()
 
     def test_move_action_saves_cwd_override(self, tmp_path, monkeypatch):
         """Pressing m, entering a valid path, saves the cwd override and
