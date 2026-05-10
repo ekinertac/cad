@@ -644,9 +644,9 @@ def summarize_session(session):
         raise click.ClickException("Could not read session content to summarize.")
 
     prompt = (
-        "Generate a concise 3-7 word title that captures what this coding "
-        "session was about. Respond with the title only — no quotes, no "
-        "trailing punctuation, no preamble.\n\n"
+        "Generate a concise 3-7 word title that captures what this session "
+        "was about. Respond with the title only — no quotes, no trailing "
+        "punctuation, no preamble.\n\n"
         f"<session>\n{excerpt}\n</session>"
     )
 
