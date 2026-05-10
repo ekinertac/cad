@@ -370,6 +370,9 @@ def select_session_action(sessions):
                 Window(
                     content=FormattedTextControl(text=get_list_text),
                     height=Dimension(min=1, preferred=VISIBLE + 2, max=VISIBLE + 2),
+                    # Long summaries clip at the right edge instead of
+                    # wrapping into multi-row rows that break the layout.
+                    wrap_lines=False,
                 ),
                 Window(content=FormattedTextControl(text=get_status_text), height=1),
             ]
@@ -653,14 +656,17 @@ def load_session_summary(session):
     else:
         session["summary"] = "(unknown provider)"
 
-    summary = session["summary"]
-    if len(summary) > 50:
-        summary = summary[:47] + "..."
     mtime = datetime.fromtimestamp(session["mtime"])
     date_str = mtime.strftime("%Y-%m-%d %H:%M")
     size_kb = session["size"] / 1024
-    badge = "[c]" if session["provider"] == "claude" else "[x]"
-    session["display"] = f"{date_str}  {size_kb:5.0f} KB  {badge}  {summary}"
+    # Collapse newlines/tabs to a single space so the picker stays one row
+    # per session — but no length cap, since the user wants the full prompt
+    # visible (terminal handles horizontal overflow).
+    summary_one_line = re.sub(r"\s+", " ", session["summary"]).strip()
+    # Provider as a path-like prefix is more scannable than a bracketed badge.
+    session["display"] = (
+        f"{date_str}  {size_kb:5.0f} KB  " f"{session['provider']}/ {summary_one_line}"
+    )
 
 
 def find_local_projects(folder=None):
