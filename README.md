@@ -1,29 +1,23 @@
-# claude-code-transcripts
+# cct — multi-agent coding-session manager
 
-[![PyPI](https://img.shields.io/pypi/v/claude-code-transcripts.svg)](https://pypi.org/project/claude-code-transcripts/)
-[![Changelog](https://img.shields.io/github/v/release/simonw/claude-code-transcripts?include_prereleases&label=changelog)](https://github.com/simonw/claude-code-transcripts/releases)
-[![Tests](https://github.com/simonw/claude-code-transcripts/workflows/Test/badge.svg)](https://github.com/simonw/claude-code-transcripts/actions?query=workflow%3ATest)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/simonw/claude-code-transcripts/blob/main/LICENSE)
+[![Tests](https://github.com/ekinertac/claude-code-transcripts/workflows/Test/badge.svg)](https://github.com/ekinertac/claude-code-transcripts/actions?query=workflow%3ATest)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/ekinertac/claude-code-transcripts/blob/main/LICENSE)
 
-Convert Claude Code session files (JSON or JSONL) to clean, mobile-friendly HTML pages with pagination.
+`cct` discovers and manages local coding-agent sessions across **claude**, **codex**, **pi**, **opencode**, and **forge**. Two-step picker (project → session), grouped by working directory so sessions from any agent in the same project land under one entry. Resume any session in its original agent, rename it, summarize it via LLM, peek at the prompts/replies in `$PAGER`, or render the full transcript to HTML.
 
-[Example transcript](https://static.simonwillison.net/static/2025/claude-code-microjs/index.html) produced using this tool.
-
-Read [A new way to extract detailed transcripts from Claude Code](https://simonwillison.net/2025/Dec/25/claude-code-transcripts/) for background on this project.
-
-> [!WARNING]
->
-> The `web` commands for both listing Claude Code for web sessions and converting those to a transcript are both broken right now due to changes to the unofficial and undocumented APIs that these commands were using. See [issue #77](https://github.com/simonw/claude-code-transcripts/issues/77) for details.
+Originally a fork of Simon Willison's [claude-code-transcripts](https://github.com/simonw/claude-code-transcripts) (the HTML transcript renderer is still in here). The session-manager UX, multi-provider discovery, and overrides are this project's work.
 
 ## Installation
 
-Install this tool using `uv`:
+Install from this repo using `uv`:
 ```bash
-uv tool install claude-code-transcripts
+uv tool install --from git+https://github.com/ekinertac/claude-code-transcripts cct
 ```
-Or run it without installing:
+Or for local development:
 ```bash
-uvx claude-code-transcripts --help
+git clone https://github.com/ekinertac/claude-code-transcripts
+cd claude-code-transcripts
+uv tool install --from . claude-code-transcripts
 ```
 
 ## Usage

@@ -1,12 +1,14 @@
 [project]
 name = "claude-code-transcripts"
 version = "0.6"
-description = "Convert Claude Code session files to HTML transcripts"
+description = "Multi-agent coding-session manager and transcript viewer for claude, codex, pi, opencode, forge"
 readme = "README.md"
 license = "Apache-2.0"
 authors = [
-    { name = "Simon Willison" }
+    { name = "Ekin Ertaç" },
 ]
+# Original transcript-rendering code by Simon Willison
+# (https://github.com/simonw/claude-code-transcripts).
 requires-python = ">=3.10"
 dependencies = [
     "click",
@@ -18,10 +20,10 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/simonw/claude-code-transcripts"
-Changelog = "https://github.com/simonw/claude-code-transcripts/releases"
-Issues = "https://github.com/simonw/claude-code-transcripts/issues"
-CI = "https://github.com/simonw/claude-code-transcripts/actions"
+Homepage = "https://github.com/ekinertac/claude-code-transcripts"
+Changelog = "https://github.com/ekinertac/claude-code-transcripts/releases"
+Issues = "https://github.com/ekinertac/claude-code-transcripts/issues"
+CI = "https://github.com/ekinertac/claude-code-transcripts/actions"
 
 [project.scripts]
 claude-code-transcripts = "claude_code_transcripts:main"
