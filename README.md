@@ -96,6 +96,7 @@ On the session step:
 - **h** renders the session to HTML (claude only — other providers' schemas need separate renderers).
 - **r** renames the session — prompts inline for a new title, saves it to `~/.cct/titles.json` keyed by `<provider>:<session_id>`, and re-enters the picker. The override wins over whatever summary the provider would otherwise show. Works across all providers.
 - **m** moves the session into a different project — prompts for a new directory, validates it exists, and saves a cwd override to `~/.cct/cwd-overrides.json`. On the next `cct` run, the session shows up under the new project. Useful when you started a session at `~/Code` and later created a subfolder for it. Empty input clears the override. Agent files are never modified.
+- **p** peeks into the session — opens its user prompts and assistant replies in `$PAGER` (falls back to `less -R`). Tool calls and system metadata are filtered out so it reads like a chat transcript. Press `q` in the pager and you're back on the same row in cct. Currently supports claude / codex / pi (JSONL providers); opencode and forge sessions print a "not yet supported" message.
 - **s** auto-summarizes by piping a session excerpt to `codex exec`, saves the returned title to the same sidecar. Uses codex's ChatGPT-account auth, so no API key needed and credit balance isn't an issue.
 - **/** opens search-filter mode (type to filter, `Enter` confirms+resumes, `Esc` exits search).
 - **Esc** cancels.

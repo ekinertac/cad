@@ -2054,6 +2054,95 @@ class TestClaudeSessionMetadata:
         assert "—" not in sess["display"]
 
 
+class TestGetSessionTranscript:
+    """Peek extracts user/assistant pairs from JSONL providers and skips
+    tool calls / system meta."""
+
+    def test_claude_extracts_user_and_assistant(self, tmp_path):
+        import claude_code_transcripts as ct
+
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            '{"type":"summary","summary":"x"}\n'
+            '{"type":"user","cwd":"/x","message":{"role":"user","content":"hi"}}\n'
+            '{"type":"assistant","message":{"role":"assistant",'
+            '"content":[{"type":"text","text":"hello"}]}}\n'
+            # Tool calls and tool results should be filtered out.
+            '{"type":"user","isMeta":true,"message":{"role":"user","content":"sys"}}\n'
+            '{"type":"user","message":{"role":"user","content":"again"}}\n'
+        )
+        sess = {"provider": "claude", "filepath": f}
+        rows = ct.get_session_transcript(sess)
+        assert rows == [("user", "hi"), ("assistant", "hello"), ("user", "again")]
+
+    def test_codex_extracts_user_message_and_agent_message(self, tmp_path):
+        import claude_code_transcripts as ct
+
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            '{"type":"session_meta","payload":{"id":"x","cwd":"/x"}}\n'
+            '{"type":"event_msg","payload":{"type":"user_message","message":"hi"}}\n'
+            '{"type":"event_msg","payload":{"type":"agent_message","message":"hello"}}\n'
+            '{"type":"event_msg","payload":{"type":"token_count","tokens":1}}\n'
+        )
+        sess = {"provider": "codex", "filepath": f}
+        rows = ct.get_session_transcript(sess)
+        assert rows == [("user", "hi"), ("assistant", "hello")]
+
+    def test_returns_empty_for_unsupported_provider(self, tmp_path):
+        import claude_code_transcripts as ct
+
+        sess = {"provider": "opencode", "filepath": tmp_path / "x.db"}
+        assert ct.get_session_transcript(sess) == []
+
+
+class TestPeekAction:
+    """The picker's `p` action runs peek_session and stays in the loop."""
+
+    def test_peek_invokes_peek_session_and_preserves_cursor(
+        self, tmp_path, monkeypatch
+    ):
+        from click.testing import CliRunner
+        from claude_code_transcripts import cli
+        import claude_code_transcripts as ct
+
+        _set_up_fake_home_with_session(tmp_path, monkeypatch)
+
+        call_log = []
+
+        def fake_select_entry(
+            entries, actions=None, back_action=None, initial_selected=0
+        ):
+            call_log.append(
+                {
+                    "n_entries": len(entries),
+                    "back_action": back_action,
+                    "initial_selected": initial_selected,
+                }
+            )
+            if len(call_log) == 1:
+                return entries[0], "open"  # project
+            if len(call_log) == 2:
+                return entries[0], "peek"  # session: peek
+            return None  # session: quit
+
+        peek_calls = []
+        monkeypatch.setattr(
+            ct, "peek_session", lambda session: peek_calls.append(session)
+        )
+        monkeypatch.setattr(ct, "select_entry", fake_select_entry)
+
+        result = CliRunner().invoke(cli, ["local"])
+        assert result.exit_code == 0
+        # Peek was invoked exactly once.
+        assert len(peek_calls) == 1
+        # After peek, the picker re-rendered with initial_selected pointing
+        # back at the row we peeked at (index 0 in this single-session fixture).
+        session_picker_calls = [c for c in call_log if c["back_action"] == "back"]
+        assert len(session_picker_calls) >= 2
+        assert session_picker_calls[1]["initial_selected"] == 0
+
+
 class TestPruneTempOutputs:
     """Tests for the temp-output prune helper that bounds disk usage in
     $TMPDIR/claude-code-transcripts/."""
@@ -2137,7 +2226,7 @@ def _make_mock_select_entry(returns):
     """
     queue = list(returns)
 
-    def fake(entries, actions=None, back_action=None):
+    def fake(entries, actions=None, back_action=None, initial_selected=0):
         if not queue:
             raise AssertionError("select_entry called more times than scripted")
         v = queue.pop(0)
@@ -2369,7 +2458,9 @@ class TestLocalSessionCLI:
         call_count = {"n": 0}
         captured = {}
 
-        def fake_select_entry(entries, actions=None, back_action=None):
+        def fake_select_entry(
+            entries, actions=None, back_action=None, initial_selected=0
+        ):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 # Project picker — pick first.
@@ -2399,7 +2490,9 @@ class TestLocalSessionCLI:
 
         call_count = {"n": 0}
 
-        def fake_select_entry(entries, actions=None, back_action=None):
+        def fake_select_entry(
+            entries, actions=None, back_action=None, initial_selected=0
+        ):
             call_count["n"] += 1
             # 1: project picker → open first; 2: session picker → back;
             # 3: project picker re-entered → cancel (quit).
@@ -2431,7 +2524,9 @@ class TestLocalSessionCLI:
 
         call_count = {"n": 0}
 
-        def fake_select_entry(entries, actions=None, back_action=None):
+        def fake_select_entry(
+            entries, actions=None, back_action=None, initial_selected=0
+        ):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return entries[0], "open"  # project picker
@@ -2489,7 +2584,9 @@ class TestLocalSessionCLI:
 
         call_log = []
 
-        def fake_select_entry(entries, actions=None, back_action=None):
+        def fake_select_entry(
+            entries, actions=None, back_action=None, initial_selected=0
+        ):
             call_log.append({"actions": actions, "n_entries": len(entries)})
             return entries[0], list(actions.keys())[0] if actions else "select"
 

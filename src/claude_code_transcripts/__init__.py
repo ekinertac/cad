@@ -272,7 +272,7 @@ def find_local_sessions(folder, limit=10):
     return results[:limit]
 
 
-def select_entry(entries, actions=None, back_action=None):
+def select_entry(entries, actions=None, back_action=None, initial_selected=0):
     """Interactive list picker with per-key actions and modal search.
 
     ``actions`` is a dict mapping key names to action labels, e.g.
@@ -285,6 +285,10 @@ def select_entry(entries, actions=None, back_action=None):
     ``back_action`` (optional): when set, Esc and Backspace (outside
     search mode) return ``(None, back_action)`` instead of cancelling.
     ``q`` and Ctrl-C still hard-cancel either way — handy escape hatch.
+
+    ``initial_selected``: 0-based index the cursor starts on. Callers
+    that re-enter the picker after a peek/rename pass the previous
+    selection here so the user comes back to the same row.
 
     Each entry must be a dict with at least ``display`` populated. The full
     entry dict is passed back to the caller so it can dispatch on whatever
@@ -309,7 +313,15 @@ def select_entry(entries, actions=None, back_action=None):
         actions = dict(actions)
         actions.setdefault("enter", "select")
 
-    state = {"selected": 0, "filter": "", "search_mode": False, "result": None}
+    # Clamp initial_selected so a caller passing a stale index against a
+    # shorter list doesn't crash the picker.
+    start = max(0, min(initial_selected, len(entries) - 1)) if entries else 0
+    state = {
+        "selected": start,
+        "filter": "",
+        "search_mode": False,
+        "result": None,
+    }
     VISIBLE = 18
 
     def filtered_indices():
@@ -620,6 +632,141 @@ def prompt_for_cwd(default=""):
         # Pre-fill the next prompt with what they typed so they can edit
         # the path (fix a typo) instead of retyping it.
         current = text
+
+
+def _flatten_content_blocks(content):
+    """Normalise an agent message's `content` field to a single text string.
+    Handles flat-string content, content-block-array content (claude/pi),
+    and anything else by returning empty.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for b in content:
+            if isinstance(b, dict) and b.get("type") == "text":
+                parts.append(b.get("text", ""))
+        return " ".join(parts).strip()
+    return ""
+
+
+def _extract_role_text(event, provider):
+    """For one JSONL event, return ``(role, text)`` if it's a user or
+    assistant message and the text is non-empty; otherwise ``("", "")``.
+    Tool calls / tool results / system meta are intentionally skipped —
+    peek mode is "what did the human and the agent say to each other?"
+    """
+    if not isinstance(event, dict):
+        return "", ""
+    if provider == "claude":
+        msg = event.get("message")
+        if not isinstance(msg, dict):
+            return "", ""
+        role = msg.get("role") or event.get("type")
+        if role not in ("user", "assistant"):
+            return "", ""
+        if event.get("isMeta"):  # claude marks injected system notes
+            return "", ""
+        return role, _flatten_content_blocks(msg.get("content"))
+    if provider == "codex":
+        if event.get("type") != "event_msg":
+            return "", ""
+        p = event.get("payload") or {}
+        ptype = p.get("type")
+        if ptype == "user_message":
+            return "user", (p.get("message") or "").strip()
+        if ptype == "agent_message":
+            return "assistant", (p.get("message") or "").strip()
+        return "", ""
+    if provider == "pi":
+        if event.get("type") != "message":
+            return "", ""
+        msg = event.get("message") or {}
+        role = msg.get("role")
+        if role not in ("user", "assistant"):
+            return "", ""
+        return role, _flatten_content_blocks(msg.get("content"))
+    return "", ""
+
+
+def get_session_transcript(session, max_chars=200_000):
+    """Return a list of ``(role, text)`` tuples for peek mode — user
+    prompts and assistant text replies only, no tool calls.
+
+    Caps total characters so an enormous session doesn't make the pager
+    take ages to load. SQLite-backed providers (opencode, forge) aren't
+    yet supported and return an empty list — peek prints a friendly
+    message in that case.
+    """
+    provider = session["provider"]
+    if provider not in ("claude", "codex", "pi"):
+        return []
+    out = []
+    total = 0
+    try:
+        with open(session["filepath"], "r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                role, text = _extract_role_text(d, provider)
+                if not text:
+                    continue
+                out.append((role, text))
+                total += len(text)
+                if total >= max_chars:
+                    out.append(("system", "[... truncated by cct peek]"))
+                    break
+    except OSError:
+        pass
+    return out
+
+
+def peek_session(session):
+    """Render the session's prompts/replies to a temp markdown file and
+    open it in ``$PAGER`` (fallback ``less -R``). Blocks until the user
+    quits the pager, then unlinks the temp file. less uses the alternate
+    screen so cct's terminal state is restored on exit — Quick Look–style.
+    """
+    transcript = get_session_transcript(session)
+    if not transcript:
+        click.echo(f"Peek not yet supported for {session['provider']} sessions.")
+        return
+
+    lines = [
+        f"# {session['provider']} session {session['session_id']}",
+        f"# {session['cwd']}",
+        "",
+    ]
+    for role, text in transcript:
+        lines.append(f"## {role.capitalize()}")
+        lines.append("")
+        lines.append(text)
+        lines.append("")
+
+    fd, path = tempfile.mkstemp(prefix="cct-peek-", suffix=".md")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(lines))
+        pager = os.environ.get("PAGER") or "less"
+        args = [pager]
+        # `-R` lets ANSI colours through if the user's pager prints any;
+        # harmless if not.
+        if Path(pager).name == "less":
+            args.append("-R")
+        args.append(path)
+        try:
+            subprocess.run(args)
+        except FileNotFoundError:
+            click.echo(f"Pager not found: {pager}", err=True)
+    finally:
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
 
 
 def _read_session_excerpt_for_summary(session, max_chars=2000):
@@ -2866,9 +3013,12 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
         for s in sessions:
             load_session_summary(s)
 
-        # Inner loop: r/s/m actions update a title/cwd and stay in the
-        # session picker; back returns to the outer loop (project picker).
+        # Inner loop: r/s/m/p actions update a title/cwd / open the pager
+        # and stay on the session picker; back returns to the outer loop.
+        # selected_idx is preserved across iterations so re-rendered
+        # pickers come back to the same row (Quick Look style).
         went_back = False
+        selected_idx = 0
         while True:
             picked = select_entry(
                 sessions,
@@ -2878,8 +3028,10 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
                     "r": "rename",
                     "s": "summarize",
                     "m": "move",
+                    "p": "peek",
                 },
                 back_action="back",
+                initial_selected=selected_idx,
             )
             if picked is None:
                 # q or Ctrl-C — hard quit.
@@ -2891,6 +3043,17 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
             if action == "back":
                 went_back = True
                 break
+
+            # Remember which row was active so the next re-entry of the
+            # picker starts on the same session.
+            try:
+                selected_idx = sessions.index(session)
+            except ValueError:
+                selected_idx = 0
+
+            if action == "peek":
+                peek_session(session)
+                continue
 
             if action == "rename":
                 new_title = prompt_for_title(default=session.get("summary") or "")
