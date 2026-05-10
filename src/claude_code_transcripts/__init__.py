@@ -7,6 +7,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import webbrowser
 from datetime import datetime
@@ -158,6 +159,31 @@ def _get_jsonl_summary(filepath, max_length=200):
     return "(no summary)"
 
 
+def get_session_cwd(jsonl_path):
+    """Return the working directory the session was started in, by scanning
+    the JSONL for the first event line that carries a ``cwd`` field. Used
+    by the resume action so we ``chdir`` to the right project before exec'ing
+    claude — far more reliable than decoding the lossy folder-name encoding
+    (where a folder like ``-Users-x-Code-claude-code-transcripts`` could
+    decode to several different real paths).
+
+    Returns ``None`` if no event in the file has a ``cwd``. Malformed JSON
+    lines are skipped so a partially-corrupted session still yields a path.
+    """
+    try:
+        with open(jsonl_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(d, dict) and d.get("cwd"):
+                    return d["cwd"]
+    except OSError:
+        return None
+    return None
+
+
 def find_local_sessions(folder, limit=10):
     """Find recent JSONL session files in the given folder.
 
@@ -184,6 +210,208 @@ def find_local_sessions(folder, limit=10):
     # Sort by modification time, most recent first
     results.sort(key=lambda x: x[0].stat().st_mtime, reverse=True)
     return results[:limit]
+
+
+def select_session_action(sessions):
+    """Interactive session picker with two actions: ``resume`` (Enter) and
+    ``html`` (h). Modal search is opened with ``/`` so plain typing can't
+    coexist with ``h`` as a hotkey — the same pattern fzf/htop use.
+
+    Each entry in ``sessions`` must be a dict with ``display`` (string) and
+    ``filepath`` (Path). Returns ``(filepath, action)`` or ``None`` if the
+    user cancelled. Built directly on prompt_toolkit because questionary's
+    select doesn't expose per-key action binding.
+    """
+    from prompt_toolkit import Application
+    from prompt_toolkit.filters import Condition
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import HSplit, Layout, Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+    from prompt_toolkit.layout.dimension import Dimension
+    from prompt_toolkit.styles import Style
+
+    state = {"selected": 0, "filter": "", "search_mode": False, "result": None}
+    VISIBLE = 18
+
+    def filtered_indices():
+        if not state["filter"]:
+            return list(range(len(sessions)))
+        needle = state["filter"].lower()
+        return [i for i, s in enumerate(sessions) if needle in s["display"].lower()]
+
+    def viewport(indices):
+        """Slice the filtered list to a window around the cursor and return
+        (visible_indices, above_count, below_count) for scroll markers."""
+        if not indices:
+            return [], 0, 0
+        # Clamp the cursor against the filtered list.
+        if state["selected"] >= len(indices):
+            state["selected"] = len(indices) - 1
+        if state["selected"] < 0:
+            state["selected"] = 0
+        top = max(0, state["selected"] - VISIBLE // 2)
+        top = min(top, max(0, len(indices) - VISIBLE))
+        visible = indices[top : top + VISIBLE]
+        return visible, top, max(0, len(indices) - top - len(visible))
+
+    def get_list_text():
+        indices = filtered_indices()
+        if not indices:
+            return [("class:hint", "  (no matches)\n")]
+        visible, above, below = viewport(indices)
+        out = []
+        if above > 0:
+            out.append(("class:hint", f"  ▲ {above} more above\n"))
+        for src_i in visible:
+            pos = indices.index(src_i)
+            sel = pos == state["selected"]
+            arrow = "» " if sel else "  "
+            style = "class:selected" if sel else ""
+            out.append((style, f"{arrow}{sessions[src_i]['display']}\n"))
+        if below > 0:
+            out.append(("class:hint", f"  ▼ {below} more below\n"))
+        return out
+
+    def get_status_text():
+        if state["search_mode"]:
+            return [
+                (
+                    "class:status",
+                    f" /{state['filter']}▁  Enter=select · Esc=exit search\n",
+                )
+            ]
+        return [
+            (
+                "class:status",
+                " Enter=resume · h=transcript · /=search · Esc=cancel\n",
+            )
+        ]
+
+    kb = KeyBindings()
+    not_searching = Condition(lambda: not state["search_mode"])
+    is_searching = Condition(lambda: state["search_mode"])
+
+    @kb.add("up")
+    def _(event):
+        if state["selected"] > 0:
+            state["selected"] -= 1
+
+    @kb.add("down")
+    def _(event):
+        if state["selected"] < len(filtered_indices()) - 1:
+            state["selected"] += 1
+
+    @kb.add("pageup")
+    def _(event):
+        state["selected"] = max(0, state["selected"] - VISIBLE)
+
+    @kb.add("pagedown")
+    def _(event):
+        state["selected"] = min(
+            len(filtered_indices()) - 1, state["selected"] + VISIBLE
+        )
+
+    @kb.add("enter")
+    def _(event):
+        indices = filtered_indices()
+        if not indices:
+            return
+        # Enter in search mode does both: confirm filter AND pick (resume).
+        state["search_mode"] = False
+        state["result"] = (
+            sessions[indices[state["selected"]]]["filepath"],
+            "resume",
+        )
+        event.app.exit()
+
+    @kb.add("h", filter=not_searching)
+    def _(event):
+        indices = filtered_indices()
+        if not indices:
+            return
+        state["result"] = (
+            sessions[indices[state["selected"]]]["filepath"],
+            "html",
+        )
+        event.app.exit()
+
+    @kb.add("/", filter=not_searching)
+    def _(event):
+        state["search_mode"] = True
+        state["filter"] = ""
+        state["selected"] = 0
+
+    @kb.add("escape", eager=True)
+    def _(event):
+        if state["search_mode"]:
+            state["search_mode"] = False
+            state["filter"] = ""
+            state["selected"] = 0
+        else:
+            event.app.exit()
+
+    @kb.add("c-c", eager=True)
+    def _(event):
+        event.app.exit()
+
+    @kb.add("backspace", filter=is_searching)
+    def _(event):
+        if state["filter"]:
+            state["filter"] = state["filter"][:-1]
+            state["selected"] = 0
+
+    @kb.add("<any>", filter=is_searching)
+    def _(event):
+        char = event.key_sequence[0].data
+        if len(char) == 1 and char.isprintable():
+            state["filter"] += char
+            state["selected"] = 0
+
+    layout = Layout(
+        HSplit(
+            [
+                Window(
+                    content=FormattedTextControl(text=get_list_text),
+                    height=Dimension(min=1, preferred=VISIBLE + 2, max=VISIBLE + 2),
+                ),
+                Window(content=FormattedTextControl(text=get_status_text), height=1),
+            ]
+        )
+    )
+    style = Style.from_dict(
+        {
+            "selected": "reverse",
+            "hint": "fg:ansibrightblack",
+            "status": "fg:ansicyan",
+        }
+    )
+    Application(layout=layout, key_bindings=kb, style=style, full_screen=False).run()
+    return state["result"]
+
+
+def resume_session(jsonl_path):
+    """Replace this process with ``claude --dangerously-skip-permissions
+    --resume <session-id>`` after chdir'ing to the cwd recorded in the JSONL.
+    Skip-permissions is intentional: permission prompts in long sessions
+    devolve into rubber-stamping (alarm fatigue). Never returns on success.
+    """
+    cwd = get_session_cwd(jsonl_path)
+    if cwd is None:
+        click.echo(
+            f"Could not recover working directory from {jsonl_path.name}.",
+            err=True,
+        )
+        sys.exit(1)
+    if not Path(cwd).is_dir():
+        click.echo(f"Original project directory no longer exists: {cwd}", err=True)
+        sys.exit(1)
+    session_id = jsonl_path.stem
+    click.echo(f"Resuming {session_id} in {cwd}...")
+    os.chdir(cwd)
+    os.execvp(
+        "claude",
+        ["claude", "--dangerously-skip-permissions", "--resume", session_id],
+    )
 
 
 TEMP_OUTPUT_PARENT = "claude-code-transcripts"
@@ -1723,12 +1951,20 @@ def cli():
     help="Open the generated index.html in your default browser (default if no -o specified).",
 )
 def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
-    """Select and convert a local Claude Code session to HTML.
+    """Select a local Claude Code session and either resume it or render
+    it to HTML.
 
-    The picker is two-step: first choose a project folder under
-    ~/.claude/projects, then choose a session within it. Project metadata
-    is gathered without reading session summaries so the first picker is
-    cheap even with hundreds of sessions on disk.
+    The picker is two-step. First choose a project folder under
+    ~/.claude/projects (questionary, with type-to-filter). Then choose a
+    session within it (custom picker). On the session step:
+
+    - Enter resumes the session — chdir to its original cwd and exec
+      ``claude --dangerously-skip-permissions --resume <id>``.
+    - h renders the session to HTML using the existing flags
+      (``-o``, ``--gist``, ``--repo``, ``--open``, ``--json``).
+
+    Project metadata is gathered without reading session summaries so the
+    first picker stays cheap even with hundreds of sessions on disk.
     """
     projects_folder = Path.home() / ".claude" / "projects"
 
@@ -1771,7 +2007,7 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
         click.echo(f"No sessions in {selected_project['name']}.")
         return
 
-    session_choices = []
+    session_entries = []
     for filepath, summary in results:
         stat = filepath.stat()
         mod_time = datetime.fromtimestamp(stat.st_mtime)
@@ -1780,24 +2016,21 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
         if len(summary) > 50:
             summary = summary[:47] + "..."
         display = f"{date_str}  {size_kb:5.0f} KB  {summary}"
-        session_choices.append(questionary.Choice(title=display, value=filepath))
+        session_entries.append({"display": display, "filepath": filepath})
 
-    selected = questionary.select(
-        "Select a session:",
-        choices=session_choices,
-        use_search_filter=True,
-        use_jk_keys=False,
-        show_selected=True,
-    ).ask()
-
-    if selected is None:
+    picked = select_session_action(session_entries)
+    if picked is None:
         click.echo("No session selected.")
         return
 
-    session_file = selected
+    session_file, action = picked
 
-    # Determine output directory and whether to open browser
-    # If no -o specified, use temp dir and open browser by default
+    if action == "resume":
+        # Replaces the current process — does not return.
+        resume_session(session_file)
+        return
+
+    # action == "html"
     auto_open = output is None and not gist and not output_auto
     if output_auto:
         # Use -o as parent dir (or current dir), with auto-named subdirectory

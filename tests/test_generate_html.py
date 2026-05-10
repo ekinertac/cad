@@ -1,6 +1,7 @@
 """Tests for HTML generation from Claude Code session JSON."""
 
 import json
+import os
 import tempfile
 from pathlib import Path
 
@@ -29,6 +30,7 @@ from claude_code_transcripts import (
     find_local_sessions,
     find_local_projects,
     _prune_temp_outputs,
+    get_session_cwd,
 )
 
 
@@ -1518,6 +1520,44 @@ class TestFindLocalProjects:
         assert all(r["name"] != "Global Sessions" for r in results)
 
 
+class TestGetSessionCwd:
+    """Tests for the JSONL cwd extractor used by the resume action."""
+
+    def test_returns_first_event_cwd(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            '{"type":"summary","summary":"x"}\n'
+            '{"type":"user","cwd":"/Users/x/Code/foo","message":{"content":"hi"}}\n'
+            '{"type":"assistant","cwd":"/Users/x/Code/foo","message":{"content":"hello"}}\n'
+        )
+        assert get_session_cwd(f) == "/Users/x/Code/foo"
+
+    def test_skips_lines_without_cwd(self, tmp_path):
+        """Summary/metadata lines often lack cwd; the helper must keep
+        scanning until it finds one."""
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            '{"type":"summary","summary":"x"}\n'
+            '{"type":"last-prompt","leafUuid":"abc"}\n'
+            '{"type":"user","cwd":"/the/right/dir","message":{"content":"hi"}}\n'
+        )
+        assert get_session_cwd(f) == "/the/right/dir"
+
+    def test_returns_none_when_no_cwd(self, tmp_path):
+        f = tmp_path / "s.jsonl"
+        f.write_text('{"type":"summary","summary":"x"}\n')
+        assert get_session_cwd(f) is None
+
+    def test_tolerates_malformed_lines(self, tmp_path):
+        """A bad JSON line shouldn't blow up the scan."""
+        f = tmp_path / "s.jsonl"
+        f.write_text(
+            "not-json\n"
+            '{"type":"user","cwd":"/recovered","message":{"content":"hi"}}\n'
+        )
+        assert get_session_cwd(f) == "/recovered"
+
+
 class TestPruneTempOutputs:
     """Tests for the temp-output prune helper that bounds disk usage in
     $TMPDIR/claude-code-transcripts/."""
@@ -1582,32 +1622,32 @@ def _make_mock_select(returns, calls=None):
 class TestLocalSessionCLI:
     """Tests for CLI behavior with local sessions."""
 
-    def test_local_shows_sessions_and_converts(self, tmp_path, monkeypatch):
-        """Test that 'local' command shows sessions and converts selected one."""
+    def test_local_html_action_generates_transcript(self, tmp_path, monkeypatch):
+        """Picking 'html' (h) on a session triggers HTML generation."""
         from click.testing import CliRunner
         from claude_code_transcripts import cli
+        import claude_code_transcripts as ct
         import questionary
 
-        # Create mock .claude/projects structure
         project_dir = tmp_path / ".claude" / "projects" / "test-project"
         project_dir.mkdir(parents=True)
 
         session_file = project_dir / "session-123.jsonl"
         session_file.write_text(
             '{"type":"summary","summary":"Test local session"}\n'
-            '{"type":"user","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}\n'
+            '{"type":"user","cwd":"/Users/x","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}\n'
         )
 
-        # Mock Path.home() to return our tmp_path
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-
-        # Two-step picker: first pick project, then session
         monkeypatch.setattr(
             questionary,
             "select",
-            _make_mock_select(
-                [{"name": "test-project", "paths": [project_dir]}, session_file]
-            ),
+            _make_mock_select([{"name": "test-project", "paths": [project_dir]}]),
+        )
+        # The session-step picker returns (filepath, action). Force the
+        # html action so the rest of the existing render flow runs.
+        monkeypatch.setattr(
+            ct, "select_session_action", lambda entries: (session_file, "html")
         )
 
         runner = CliRunner()
@@ -1617,36 +1657,56 @@ class TestLocalSessionCLI:
         assert "Loading projects" in result.output
         assert "Generated" in result.output
 
-    def test_no_args_runs_local_command(self, tmp_path, monkeypatch):
-        """Test that running with no arguments runs local command."""
+    def test_local_resume_action_invokes_claude(self, tmp_path, monkeypatch):
+        """Picking the default Enter (resume) action chdir's to the cwd
+        recorded in the JSONL and exec's claude with skip-permissions."""
         from click.testing import CliRunner
         from claude_code_transcripts import cli
+        import claude_code_transcripts as ct
         import questionary
 
-        # Create mock .claude/projects structure
         project_dir = tmp_path / ".claude" / "projects" / "test-project"
         project_dir.mkdir(parents=True)
+        # The cwd the JSONL claims must actually exist for resume to proceed.
+        real_cwd = tmp_path / "real-project"
+        real_cwd.mkdir()
 
-        session_file = project_dir / "session-123.jsonl"
+        session_file = project_dir / "abc-123.jsonl"
         session_file.write_text(
-            '{"type":"summary","summary":"Test default session"}\n'
-            '{"type":"user","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}\n'
+            '{"type":"summary","summary":"Test session"}\n'
+            f'{{"type":"user","cwd":"{real_cwd}","message":{{"content":"Hi"}}}}\n'
         )
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         monkeypatch.setattr(
             questionary,
             "select",
-            _make_mock_select(
-                [{"name": "test-project", "paths": [project_dir]}, session_file]
-            ),
+            _make_mock_select([{"name": "test-project", "paths": [project_dir]}]),
+        )
+        monkeypatch.setattr(
+            ct, "select_session_action", lambda entries: (session_file, "resume")
         )
 
-        runner = CliRunner()
-        result = runner.invoke(cli, [])
+        # Capture the exec call instead of actually replacing the process.
+        exec_calls = []
 
-        assert result.exit_code == 0
-        assert "Loading projects" in result.output
+        def fake_execvp(file, args):
+            exec_calls.append((file, args, os.getcwd()))
+
+        monkeypatch.setattr(ct.os, "execvp", fake_execvp)
+
+        runner = CliRunner()
+        result = runner.invoke(cli, ["local"])
+
+        assert result.exit_code == 0, result.output
+        assert len(exec_calls) == 1
+        file, args, cwd_at_exec = exec_calls[0]
+        assert file == "claude"
+        assert args[0] == "claude"
+        assert "--dangerously-skip-permissions" in args
+        assert "--resume" in args
+        assert "abc-123" in args
+        assert cwd_at_exec == str(real_cwd)
 
     def test_local_handles_cancelled_project_selection(self, tmp_path, monkeypatch):
         """Cancelling at the project picker exits with a friendly message."""
@@ -1673,9 +1733,10 @@ class TestLocalSessionCLI:
         assert "No project selected" in result.output
 
     def test_local_handles_cancelled_session_selection(self, tmp_path, monkeypatch):
-        """Cancelling at the session picker exits with the existing message."""
+        """Cancelling at the session picker (Esc) exits cleanly."""
         from click.testing import CliRunner
         from claude_code_transcripts import cli
+        import claude_code_transcripts as ct
         import questionary
 
         project_dir = tmp_path / ".claude" / "projects" / "test-project"
@@ -1691,8 +1752,9 @@ class TestLocalSessionCLI:
         monkeypatch.setattr(
             questionary,
             "select",
-            _make_mock_select([{"name": "test-project", "paths": [project_dir]}, None]),
+            _make_mock_select([{"name": "test-project", "paths": [project_dir]}]),
         )
+        monkeypatch.setattr(ct, "select_session_action", lambda entries: None)
 
         runner = CliRunner()
         result = runner.invoke(cli, ["local"])
@@ -1700,12 +1762,13 @@ class TestLocalSessionCLI:
         assert result.exit_code == 0
         assert "No session selected" in result.output
 
-    def test_local_pickers_have_search_filter_enabled(self, tmp_path, monkeypatch):
-        """Both pickers must pass use_search_filter=True so users can type to
-        narrow a long list. Pinning this in a test prevents accidental
-        regression if the questionary call sites are ever refactored."""
+    def test_project_picker_has_search_filter_enabled(self, tmp_path, monkeypatch):
+        """The project picker (still on questionary) keeps type-to-filter so
+        users with many projects can narrow the list quickly. Pinned to
+        catch accidental regressions during refactors."""
         from click.testing import CliRunner
         from claude_code_transcripts import cli
+        import claude_code_transcripts as ct
         import questionary
 
         project_dir = tmp_path / ".claude" / "projects" / "test-project"
@@ -1714,7 +1777,7 @@ class TestLocalSessionCLI:
         session_file = project_dir / "session-123.jsonl"
         session_file.write_text(
             '{"type":"summary","summary":"Test session"}\n'
-            '{"type":"user","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}\n'
+            '{"type":"user","cwd":"/Users/x","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}\n'
         )
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -1723,17 +1786,20 @@ class TestLocalSessionCLI:
             questionary,
             "select",
             _make_mock_select(
-                [{"name": "test-project", "paths": [project_dir]}, session_file],
+                [{"name": "test-project", "paths": [project_dir]}],
                 calls=calls,
             ),
+        )
+        monkeypatch.setattr(
+            ct, "select_session_action", lambda entries: (session_file, "html")
         )
 
         runner = CliRunner()
         result = runner.invoke(cli, ["local"])
 
         assert result.exit_code == 0
-        assert len(calls) == 2, "expected two questionary.select calls"
-        assert all(c.get("use_search_filter") is True for c in calls)
+        assert len(calls) == 1, "expected one questionary.select call (project)"
+        assert calls[0].get("use_search_filter") is True
 
 
 class TestOutputAutoOption:
@@ -1810,6 +1876,7 @@ class TestOutputAutoOption:
         """Test that local -a creates output subdirectory named after file stem."""
         from click.testing import CliRunner
         from claude_code_transcripts import cli
+        import claude_code_transcripts as ct
         import questionary
 
         # Create mock .claude/projects structure
@@ -1819,20 +1886,20 @@ class TestOutputAutoOption:
         session_file = project_dir / "my-session-file.jsonl"
         session_file.write_text(
             '{"type":"summary","summary":"Test local session"}\n'
-            '{"type":"user","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}\n'
+            '{"type":"user","cwd":"/Users/x","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}\n'
         )
 
         output_parent = tmp_path / "output"
         output_parent.mkdir()
 
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        # Two-step picker: project, then session
         monkeypatch.setattr(
             questionary,
             "select",
-            _make_mock_select(
-                [{"name": "test-project", "paths": [project_dir]}, session_file]
-            ),
+            _make_mock_select([{"name": "test-project", "paths": [project_dir]}]),
+        )
+        monkeypatch.setattr(
+            ct, "select_session_action", lambda entries: (session_file, "html")
         )
 
         runner = CliRunner()

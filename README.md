@@ -65,12 +65,19 @@ The generated output includes:
 Local Claude Code sessions are stored as JSONL files in `~/.claude/projects`. Run with no arguments to launch a two-step picker — first choose a project folder, then a session within it:
 
 ```bash
-claude-code-transcripts
+cct
 # or explicitly:
-claude-code-transcripts local
+cct local
 ```
 
-The first picker lists every project folder under `~/.claude/projects`, sorted by most recent activity, with each project's session count. Once you pick a project, every session in it is shown (newest first), so older sessions stay reachable.
+The first picker lists every project folder under `~/.claude/projects`, sorted by most recent activity, with each project's session count. Type to filter. Once you pick a project, every session in it is shown (newest first), so older sessions stay reachable.
+
+On the session step:
+
+- **Enter** resumes the session — `cd`s into the project's original working directory and execs `claude --dangerously-skip-permissions --resume <id>`. The skip-permissions flag is intentional: long sessions devolve into rubber-stamping permission prompts, so they're disabled by default.
+- **h** renders the session to HTML using the flags below (`-o`, `--gist`, `--open`, etc.).
+- **/** opens search-filter mode (type to filter, `Enter` confirms+resumes, `Esc` exits search).
+- **Esc** cancels.
 
 ### Web sessions
 
