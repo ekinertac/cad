@@ -598,13 +598,17 @@ def _extract_summarizable_text(event):
 
 def summarize_session(session):
     """Generate a short title for the session by piping an excerpt to the
-    locally-installed ``claude`` CLI in non-interactive (``-p``) mode.
+    locally-installed ``codex`` CLI in non-interactive mode.
 
-    Using the CLI instead of the Anthropic SDK is intentional: the CLI
-    uses the user's Claude Code subscription auth, so summarize works
-    even when their raw API credits are exhausted. Haiku is fast and
-    plenty for a 3-7 word title. Raises :class:`click.ClickException` on
-    timeout, missing binary, non-zero exit, or empty output.
+    Codex over a ChatGPT account is the cheapest path here: ``claude -p``
+    insists on the Anthropic API even when the Claude Code subscription
+    is active, so users with depleted API credits can't use it. Codex
+    exec uses the same auth as their interactive codex sessions. The
+    final stdout line is the agent's reply (codex prints framing info on
+    stderr that we discard).
+
+    Raises :class:`click.ClickException` on timeout, missing binary,
+    non-zero exit, or empty output.
     """
     excerpt = _read_session_excerpt_for_summary(session)
     if not excerpt:
@@ -619,15 +623,14 @@ def summarize_session(session):
 
     try:
         result = subprocess.run(
-            ["claude", "-p", "--model", "haiku"],
-            input=prompt,
+            ["codex", "exec", prompt],
             capture_output=True,
             text=True,
             timeout=60,
         )
     except FileNotFoundError:
         raise click.ClickException(
-            "`claude` not found on PATH — summarize uses it as the LLM."
+            "`codex` not found on PATH — summarize uses it as the LLM."
         )
     except subprocess.TimeoutExpired:
         raise click.ClickException("Summarize timed out after 60s.")
@@ -635,13 +638,16 @@ def summarize_session(session):
     if result.returncode != 0:
         stderr = (result.stderr or "").strip()
         raise click.ClickException(
-            f"claude exited with code {result.returncode}: {stderr[:200]}"
+            f"codex exited with code {result.returncode}: {stderr[-200:]}"
         )
 
-    # Strip wrapping quotes the model sometimes adds despite the instruction.
-    title = result.stdout.strip().strip("\"'").strip()
+    # Take the last non-empty line — codex's reply is the final stdout chunk,
+    # any preceding lines are typically status output. Strip wrapping quotes
+    # the model sometimes adds despite the instruction.
+    lines = [ln.strip() for ln in result.stdout.strip().splitlines() if ln.strip()]
+    title = (lines[-1] if lines else "").strip("\"'").strip()
     if not title:
-        raise click.ClickException("claude returned an empty title.")
+        raise click.ClickException("codex returned an empty title.")
     return title
 
 

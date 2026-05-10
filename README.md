@@ -95,7 +95,7 @@ On the session step:
   Skip-permissions on claude is intentional: long sessions devolve into rubber-stamping permission prompts.
 - **h** renders the session to HTML (claude only — other providers' schemas need separate renderers).
 - **r** renames the session — prompts inline for a new title, saves it to `~/.cct/titles.json` keyed by `<provider>:<session_id>`, and re-enters the picker. The override wins over whatever summary the provider would otherwise show. Works across all providers.
-- **s** auto-summarizes by piping a session excerpt to the locally-installed `claude` CLI (`claude -p --model haiku`), saves the returned title to the same sidecar. Uses your Claude Code subscription auth — no separate API key or credits needed.
+- **s** auto-summarizes by piping a session excerpt to `codex exec`, saves the returned title to the same sidecar. Uses codex's ChatGPT-account auth, so no API key needed and credit balance isn't an issue.
 - **/** opens search-filter mode (type to filter, `Enter` confirms+resumes, `Esc` exits search).
 - **Esc** cancels.
 
