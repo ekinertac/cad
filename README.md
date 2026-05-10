@@ -62,7 +62,14 @@ The generated output includes:
 
 ### Local sessions
 
-Local Claude Code sessions are stored as JSONL files in `~/.claude/projects`. Run with no arguments to launch a two-step picker — first choose a project folder, then a session within it:
+`cct` discovers sessions from multiple agent CLIs:
+
+- **Claude Code** — `~/.claude/projects/*/<uuid>.jsonl`
+- **Codex CLI** — `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`
+
+Sessions are grouped by their recorded working directory (cwd), so claude and codex sessions in the same project share a single project entry. Each row's badge shows the per-provider counts: `(2c+1x)` = 2 claude + 1 codex sessions.
+
+Run with no arguments to launch a two-step picker — first choose a project, then a session within it:
 
 ```bash
 cct
@@ -74,8 +81,8 @@ The first picker lists every project folder under `~/.claude/projects`, sorted b
 
 On the session step:
 
-- **Enter** resumes the session — `cd`s into the project's original working directory and execs `claude --dangerously-skip-permissions --resume <id>`. The skip-permissions flag is intentional: long sessions devolve into rubber-stamping permission prompts, so they're disabled by default.
-- **h** renders the session to HTML using the flags below (`-o`, `--gist`, `--open`, etc.).
+- **Enter** resumes the session — `cd`s into the project's original working directory and execs the right agent CLI for that session: `claude --dangerously-skip-permissions --resume <id>` or `codex resume <id>`. Skip-permissions on claude is intentional: long sessions devolve into rubber-stamping permission prompts.
+- **h** renders the session to HTML (claude only — codex rendering is not yet supported).
 - **/** opens search-filter mode (type to filter, `Enter` confirms+resumes, `Esc` exits search).
 - **Esc** cancels.
 

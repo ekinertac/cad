@@ -1298,214 +1298,268 @@ class TestFindLocalSessions:
         assert len(results) == 15
 
 
-def _write_session(folder, name, summary="Session"):
-    """Helper: write a minimal valid session JSONL into folder."""
+def _write_session(folder, name, summary="Session", cwd=None):
+    """Helper: write a minimal valid claude session JSONL into folder.
+
+    The JSONL includes a ``cwd`` field on the user line so the new
+    cwd-based grouping picks the file up. Tests that need a specific
+    project directory pass it via ``cwd``; default is ``str(folder)``
+    (so each session group lives under its own synthetic project).
+    """
+    if cwd is None:
+        cwd = str(folder)
     f = folder / name
     f.write_text(
         f'{{"type":"summary","summary":"{summary}"}}\n'
-        '{"type":"user","timestamp":"2025-01-01T00:00:00Z",'
+        f'{{"type":"user","cwd":"{cwd}","timestamp":"2025-01-01T00:00:00Z",'
         '"message":{"role":"user","content":"test"}}\n'
     )
     return f
 
 
 class TestFindLocalProjects:
-    """Tests for find_local_projects which discovers project folders without
-    reading session summaries (the speed win behind the two-step picker)."""
+    """Tests for find_local_projects: cwd-based grouping across providers.
 
-    def test_returns_empty_for_missing_folder(self, tmp_path):
+    The picker doesn't load summaries until a project is chosen, so these
+    tests exercise the discover+group layer only.
+    """
+
+    def test_returns_empty_for_missing_folder(self, tmp_path, monkeypatch):
+        # Ensure codex root also doesn't pull anything from the real machine
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake-home")
         assert find_local_projects(tmp_path / "does-not-exist") == []
 
-    def test_returns_empty_for_empty_folder(self, tmp_path):
+    def test_returns_empty_for_empty_folder(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake-home")
         projects_dir = tmp_path / ".claude" / "projects"
         projects_dir.mkdir(parents=True)
         assert find_local_projects(projects_dir) == []
 
-    def test_skips_folders_with_no_jsonl(self, tmp_path):
+    def test_skips_sessions_without_cwd(self, tmp_path, monkeypatch):
+        """Sessions whose JSONL has no cwd (warmups / broken files) can't be
+        grouped meaningfully and are dropped."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake-home")
         projects_dir = tmp_path / ".claude" / "projects"
         proj = projects_dir / "-Users-x-Code-foo"
         proj.mkdir(parents=True)
-        (proj / "readme.txt").write_text("nope")
+        # No cwd field — just a summary line.
+        (proj / "s.jsonl").write_text(
+            '{"type":"summary","summary":"x"}\n'
+            '{"type":"user","message":{"content":"hi"}}\n'
+        )
         assert find_local_projects(projects_dir) == []
 
-    def test_skips_folders_with_only_agent_files(self, tmp_path):
+    def test_skips_agent_files(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake-home")
         projects_dir = tmp_path / ".claude" / "projects"
         proj = projects_dir / "-Users-x-Code-foo"
         proj.mkdir(parents=True)
-        _write_session(proj, "agent-123.jsonl")
+        _write_session(proj, "agent-123.jsonl", cwd="/Users/x/Code/foo")
         assert find_local_projects(projects_dir) == []
 
-    def test_counts_sessions_correctly(self, tmp_path):
+    def test_groups_sessions_by_cwd(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake-home")
         projects_dir = tmp_path / ".claude" / "projects"
         proj = projects_dir / "-Users-x-Code-foo"
         proj.mkdir(parents=True)
-        _write_session(proj, "a.jsonl")
-        _write_session(proj, "b.jsonl")
-        _write_session(proj, "c.jsonl")
-        _write_session(proj, "agent-skip.jsonl")  # excluded
+        _write_session(proj, "a.jsonl", cwd="/Users/x/Code/foo")
+        _write_session(proj, "b.jsonl", cwd="/Users/x/Code/foo")
+        _write_session(proj, "c.jsonl", cwd="/Users/x/Code/foo")
+        _write_session(proj, "agent-skip.jsonl", cwd="/Users/x/Code/foo")
+
         results = find_local_projects(projects_dir)
         assert len(results) == 1
         assert results[0]["session_count"] == 3
+        assert results[0]["cwd"] == "/Users/x/Code/foo"
+        assert results[0]["name"] == "foo"
+        assert results[0]["n_claude"] == 3
+        assert results[0]["n_codex"] == 0
 
-    def test_latest_mtime_is_max_session_mtime(self, tmp_path):
-        import os
+    def test_latest_mtime_is_max_session_mtime(self, tmp_path, monkeypatch):
+        import os as _os
 
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake-home")
         projects_dir = tmp_path / ".claude" / "projects"
         proj = projects_dir / "-Users-x-Code-foo"
         proj.mkdir(parents=True)
-        old = _write_session(proj, "old.jsonl")
-        new = _write_session(proj, "new.jsonl")
-        os.utime(old, (1_000_000, 1_000_000))
-        os.utime(new, (2_000_000, 2_000_000))
+        old = _write_session(proj, "old.jsonl", cwd="/Users/x/Code/foo")
+        new = _write_session(proj, "new.jsonl", cwd="/Users/x/Code/foo")
+        _os.utime(old, (1_000_000, 1_000_000))
+        _os.utime(new, (2_000_000, 2_000_000))
 
         results = find_local_projects(projects_dir)
         assert len(results) == 1
         assert results[0]["latest_mtime"] == 2_000_000
 
-    def test_sorted_by_latest_mtime_desc(self, tmp_path):
-        import os
+    def test_sorted_by_latest_mtime_desc(self, tmp_path, monkeypatch):
+        import os as _os
 
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake-home")
         projects_dir = tmp_path / ".claude" / "projects"
-        a = projects_dir / "-Users-x-Code-aaa"
-        b = projects_dir / "-Users-x-Code-bbb"
-        c = projects_dir / "-Users-x-Code-ccc"
-        for p in (a, b, c):
-            p.mkdir(parents=True)
-        os.utime(_write_session(a, "s.jsonl"), (1_000_000, 1_000_000))
-        os.utime(_write_session(b, "s.jsonl"), (3_000_000, 3_000_000))
-        os.utime(_write_session(c, "s.jsonl"), (2_000_000, 2_000_000))
+        for raw, dirname in [
+            ("-Users-x-Code-aaa", "/Users/x/Code/aaa"),
+            ("-Users-x-Code-bbb", "/Users/x/Code/bbb"),
+            ("-Users-x-Code-ccc", "/Users/x/Code/ccc"),
+        ]:
+            (projects_dir / raw).mkdir(parents=True)
+        _os.utime(
+            _write_session(
+                projects_dir / "-Users-x-Code-aaa", "s.jsonl", cwd="/Users/x/Code/aaa"
+            ),
+            (1_000_000, 1_000_000),
+        )
+        _os.utime(
+            _write_session(
+                projects_dir / "-Users-x-Code-bbb", "s.jsonl", cwd="/Users/x/Code/bbb"
+            ),
+            (3_000_000, 3_000_000),
+        )
+        _os.utime(
+            _write_session(
+                projects_dir / "-Users-x-Code-ccc", "s.jsonl", cwd="/Users/x/Code/ccc"
+            ),
+            (2_000_000, 2_000_000),
+        )
 
         results = find_local_projects(projects_dir)
-        assert [r["raw_name"] for r in results] == [
-            "-Users-x-Code-bbb",
-            "-Users-x-Code-ccc",
-            "-Users-x-Code-aaa",
-        ]
+        assert [r["name"] for r in results] == ["bbb", "ccc", "aaa"]
 
-    def test_display_name_uses_helper(self, tmp_path):
+    def test_display_name_is_cwd_basename(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake-home")
         projects_dir = tmp_path / ".claude" / "projects"
         proj = projects_dir / "-Users-x-Code-foo"
         proj.mkdir(parents=True)
-        _write_session(proj, "s.jsonl")
-        results = find_local_projects(projects_dir)
-        assert results[0]["name"] == "foo"
+        _write_session(proj, "s.jsonl", cwd="/Users/x/Code/foo")
+        assert find_local_projects(projects_dir)[0]["name"] == "foo"
 
-    def test_collision_appends_disambiguator(self, tmp_path):
-        """Two folders that collapse to the same display name get the raw
-        folder appended; a third, unique folder stays clean."""
+    def test_collision_appends_cwd(self, tmp_path, monkeypatch):
+        """Two real projects with the same basename but different cwds get
+        the full cwd appended to their display row only."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake-home")
         projects_dir = tmp_path / ".claude" / "projects"
-        # Both of these reduce to the same display name via
-        # get_project_display_name (intermediate dirs stripped).
-        a = projects_dir / "-Users-x-Code-foo"
-        b = projects_dir / "-Users-x-projects-foo"
-        c = projects_dir / "-Users-x-Code-unique"
+        a = projects_dir / "raw-a"
+        b = projects_dir / "raw-b"
+        c = projects_dir / "raw-c"
         for p in (a, b, c):
             p.mkdir(parents=True)
-            _write_session(p, "s.jsonl")
+        _write_session(a, "s.jsonl", cwd="/Users/x/Code/foo")
+        _write_session(b, "s.jsonl", cwd="/Users/x/projects/foo")
+        _write_session(c, "s.jsonl", cwd="/Users/x/Code/unique")
 
         results = find_local_projects(projects_dir)
-        by_raw = {r["raw_name"]: r for r in results}
+        by_cwd = {r["cwd"]: r for r in results}
 
-        # Both colliders carry the disambiguator suffix in their display string
-        assert "(-Users-x-Code-foo)" in by_raw["-Users-x-Code-foo"]["display"]
-        assert "(-Users-x-projects-foo)" in by_raw["-Users-x-projects-foo"]["display"]
-        # Non-colliding row stays clean
-        assert "(" not in by_raw["-Users-x-Code-unique"]["display"]
+        assert "/Users/x/Code/foo" in by_cwd["/Users/x/Code/foo"]["display"]
+        assert "/Users/x/projects/foo" in by_cwd["/Users/x/projects/foo"]["display"]
+        assert "/Users/x/Code/unique" not in by_cwd["/Users/x/Code/unique"]["display"]
 
-    def test_does_not_read_session_summaries(self, tmp_path, monkeypatch):
-        """find_local_projects must not call get_session_summary — the whole
-        point is to keep the project picker cheap."""
-        import claude_code_transcripts
+    def test_does_not_load_summaries(self, tmp_path, monkeypatch):
+        """The project picker hydration must not pull summaries up front."""
+        import claude_code_transcripts as ct
 
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake-home")
         projects_dir = tmp_path / ".claude" / "projects"
         proj = projects_dir / "-Users-x-Code-foo"
         proj.mkdir(parents=True)
-        _write_session(proj, "s.jsonl")
+        _write_session(proj, "s.jsonl", cwd="/Users/x/Code/foo")
 
         def boom(*a, **kw):
-            raise AssertionError("get_session_summary should not be called")
+            raise AssertionError("summary loader should not be called")
 
-        monkeypatch.setattr(claude_code_transcripts, "get_session_summary", boom)
-        # Should not raise
+        monkeypatch.setattr(ct, "get_session_summary", boom)
+        monkeypatch.setattr(ct, "get_codex_summary", boom)
+        monkeypatch.setattr(ct, "load_session_summary", boom)
         results = find_local_projects(projects_dir)
         assert len(results) == 1
 
-    def test_real_projects_carry_paths_list(self, tmp_path):
-        """Every project entry exposes a paths list (single-element for real
-        projects). The session picker uses this uniformly across real and
-        virtual projects."""
+    def test_real_project_exposes_session_filepaths(self, tmp_path, monkeypatch):
+        """Every project entry exposes its sessions list with filepaths so
+        the second-step picker / dispatch has what it needs."""
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake-home")
         projects_dir = tmp_path / ".claude" / "projects"
         proj = projects_dir / "-Users-x-Code-foo"
         proj.mkdir(parents=True)
-        _write_session(proj, "s.jsonl")
-
+        f = _write_session(proj, "s.jsonl", cwd="/Users/x/Code/foo")
         results = find_local_projects(projects_dir)
-        assert results[0]["paths"] == [proj]
+        assert [s["filepath"] for s in results[0]["sessions"]] == [f]
 
     def test_merges_home_and_home_code_into_global_sessions(
         self, tmp_path, monkeypatch
     ):
-        """The two folders the user uses for quick one-off questions
-        (~/ and ~/Code) merge into a single virtual 'Global Sessions' entry."""
+        """Sessions whose cwd is ~/ or ~/Code merge into one virtual entry."""
         monkeypatch.setattr(Path, "home", lambda: Path("/Users/x"))
-
         projects_dir = tmp_path / ".claude" / "projects"
         home_folder = projects_dir / "-Users-x"
         code_folder = projects_dir / "-Users-x-Code"
         for p in (home_folder, code_folder):
             p.mkdir(parents=True)
-        _write_session(home_folder, "a.jsonl")
-        _write_session(home_folder, "b.jsonl")
-        _write_session(code_folder, "c.jsonl")
-
-        results = find_local_projects(projects_dir)
-        # Exactly one virtual entry — neither raw folder appears separately.
-        assert len(results) == 1
-        global_entry = results[0]
-        assert global_entry["name"] == "Global Sessions"
-        assert global_entry["session_count"] == 3
-        assert sorted(global_entry["paths"]) == sorted([home_folder, code_folder])
-
-    def test_only_home_present_still_produces_global_sessions(
-        self, tmp_path, monkeypatch
-    ):
-        """If only one of the two global folders exists, the virtual entry
-        still represents it (no need to require both)."""
-        monkeypatch.setattr(Path, "home", lambda: Path("/Users/x"))
-
-        projects_dir = tmp_path / ".claude" / "projects"
-        home_folder = projects_dir / "-Users-x"
-        home_folder.mkdir(parents=True)
-        _write_session(home_folder, "a.jsonl")
+        _write_session(home_folder, "a.jsonl", cwd="/Users/x")
+        _write_session(home_folder, "b.jsonl", cwd="/Users/x")
+        _write_session(code_folder, "c.jsonl", cwd="/Users/x/Code")
 
         results = find_local_projects(projects_dir)
         assert len(results) == 1
         assert results[0]["name"] == "Global Sessions"
-        assert results[0]["paths"] == [home_folder]
+        assert results[0]["session_count"] == 3
+        assert results[0]["cwd"] is None
+
+    def test_only_home_present_still_produces_global_sessions(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(Path, "home", lambda: Path("/Users/x"))
+        projects_dir = tmp_path / ".claude" / "projects"
+        home_folder = projects_dir / "-Users-x"
+        home_folder.mkdir(parents=True)
+        _write_session(home_folder, "a.jsonl", cwd="/Users/x")
+
+        results = find_local_projects(projects_dir)
+        assert len(results) == 1
+        assert results[0]["name"] == "Global Sessions"
 
     def test_global_sessions_does_not_swallow_real_projects(
         self, tmp_path, monkeypatch
     ):
-        """A real project under ~/Code (e.g. ~/Code/foo) keeps its own entry —
-        only the bare ~/ and ~/Code folders are merged."""
+        """Real projects under ~/Code (e.g. ~/Code/foo) keep their own entry."""
         monkeypatch.setattr(Path, "home", lambda: Path("/Users/x"))
-
         projects_dir = tmp_path / ".claude" / "projects"
         home_folder = projects_dir / "-Users-x"
-        code_folder = projects_dir / "-Users-x-Code"
-        real_proj = projects_dir / "-Users-x-Code-claude-code-transcripts"
-        for p in (home_folder, code_folder, real_proj):
+        real_proj = projects_dir / "-Users-x-Code-foo"
+        for p in (home_folder, real_proj):
             p.mkdir(parents=True)
-            _write_session(p, "s.jsonl")
+        _write_session(home_folder, "h.jsonl", cwd="/Users/x")
+        _write_session(real_proj, "r.jsonl", cwd="/Users/x/Code/foo")
 
         results = find_local_projects(projects_dir)
         names = [r["name"] for r in results]
         assert "Global Sessions" in names
-        # The real project survives as a separate, non-virtual entry.
-        assert any(
-            r["paths"] == [real_proj] and r["name"] != "Global Sessions"
-            for r in results
+        assert "foo" in names
+
+    def test_codex_sessions_merge_with_claude_by_cwd(self, tmp_path, monkeypatch):
+        """A claude session and a codex session sharing the same cwd land in
+        a single project entry; the badge counts each provider."""
+        fake_home = tmp_path / "fake-home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        projects_dir = tmp_path / ".claude" / "projects" / "-Users-x-Code-foo"
+        projects_dir.mkdir(parents=True)
+        _write_session(projects_dir, "claude-1.jsonl", cwd="/Users/x/Code/foo")
+
+        # find_codex_sessions reads from Path.home()/.codex/sessions/, so the
+        # codex fixture has to live under our fake home.
+        codex_dir = fake_home / ".codex" / "sessions" / "2026" / "01" / "01"
+        codex_dir.mkdir(parents=True)
+        codex_file = codex_dir / "rollout-2026-01-01T00-00-00-codex-uuid.jsonl"
+        codex_file.write_text(
+            '{"type":"session_meta","payload":{"id":"codex-uuid","cwd":"/Users/x/Code/foo"}}\n'
         )
+
+        results = find_local_projects(tmp_path / ".claude" / "projects")
+        assert len(results) == 1
+        assert results[0]["session_count"] == 2
+        assert results[0]["n_claude"] == 1
+        assert results[0]["n_codex"] == 1
+        assert "1c+1x" in results[0]["display"]
 
     def test_no_global_entry_when_no_global_folders(self, tmp_path, monkeypatch):
         """If neither ~/ nor ~/Code has sessions, no virtual entry is added."""
@@ -1520,10 +1574,25 @@ class TestFindLocalProjects:
         assert all(r["name"] != "Global Sessions" for r in results)
 
 
+def _make_session(provider, session_id, cwd, filepath=None):
+    """Helper: build a session dict with the minimum keys resume_session
+    inspects. Tests don't need the lazy-loaded summary/display fields."""
+    return {
+        "provider": provider,
+        "session_id": session_id,
+        "cwd": str(cwd),
+        "filepath": filepath or Path(f"/fake/{session_id}.jsonl"),
+        "mtime": 0.0,
+        "size": 0,
+        "summary": None,
+        "display": None,
+    }
+
+
 class TestResumeWritesCwdFile:
     """When CCT_CWD_FILE is set in the environment, resume_session writes
     the target cwd to that file before exec'ing claude. The shell wrapper
-    installed via `cct shell-init` reads it after claude exits to chdir
+    installed via `cct shell-init` reads it after the agent exits to chdir
     the parent shell."""
 
     def test_writes_cwd_when_env_set(self, tmp_path, monkeypatch):
@@ -1531,17 +1600,14 @@ class TestResumeWritesCwdFile:
 
         real_cwd = tmp_path / "proj"
         real_cwd.mkdir()
-        jsonl = tmp_path / "sess.jsonl"
-        jsonl.write_text(f'{{"type":"user","cwd":"{real_cwd}"}}\n')
+        sess = _make_session("claude", "abc", real_cwd)
 
         cwd_file = tmp_path / "cct-cwd"
         monkeypatch.setenv("CCT_CWD_FILE", str(cwd_file))
-
-        # Stub execvp so the test doesn't actually replace the process.
         monkeypatch.setattr(ct.os, "execvp", lambda *a, **kw: None)
         monkeypatch.setattr(ct.os, "chdir", lambda *a, **kw: None)
 
-        ct.resume_session(jsonl)
+        ct.resume_session(sess)
         assert cwd_file.read_text() == str(real_cwd)
 
     def test_no_file_written_when_env_unset(self, tmp_path, monkeypatch):
@@ -1550,16 +1616,37 @@ class TestResumeWritesCwdFile:
 
         real_cwd = tmp_path / "proj"
         real_cwd.mkdir()
-        jsonl = tmp_path / "sess.jsonl"
-        jsonl.write_text(f'{{"type":"user","cwd":"{real_cwd}"}}\n')
+        sess = _make_session("claude", "abc", real_cwd)
 
         monkeypatch.delenv("CCT_CWD_FILE", raising=False)
         monkeypatch.setattr(ct.os, "execvp", lambda *a, **kw: None)
         monkeypatch.setattr(ct.os, "chdir", lambda *a, **kw: None)
 
-        ct.resume_session(jsonl)
+        ct.resume_session(sess)
         # No file was specified so nothing should be written; just confirming
         # the call didn't crash.
+
+    def test_codex_provider_invokes_codex_resume(self, tmp_path, monkeypatch):
+        """resume_session dispatches to ``codex resume <id>`` for codex
+        sessions instead of claude --resume."""
+        import claude_code_transcripts as ct
+
+        real_cwd = tmp_path / "proj"
+        real_cwd.mkdir()
+        sess = _make_session("codex", "codex-uuid", real_cwd)
+
+        captured = {}
+
+        def fake_execvp(file, args):
+            captured["file"] = file
+            captured["args"] = args
+
+        monkeypatch.setattr(ct.os, "execvp", fake_execvp)
+        monkeypatch.setattr(ct.os, "chdir", lambda *a, **kw: None)
+
+        ct.resume_session(sess)
+        assert captured["file"] == "codex"
+        assert captured["args"] == ["codex", "resume", "codex-uuid"]
 
 
 class TestShellInit:
@@ -1676,7 +1763,11 @@ class TestPruneTempOutputs:
 
 def _make_mock_select(returns, calls=None):
     """Build a questionary.select stand-in that returns the next value from
-    `returns` on each .ask() call. Used to script the two-step picker.
+    `returns` on each .ask() call. Used to script the project picker.
+
+    Special sentinel ``"__first__"`` picks the first choice's ``value`` —
+    handy for tests that want the discovery layer to run for real and just
+    auto-select what it found, instead of hand-constructing project dicts.
 
     If `calls` (a list) is passed, each invocation appends its kwargs to it
     so tests can assert what was passed to questionary.select.
@@ -1687,193 +1778,213 @@ def _make_mock_select(returns, calls=None):
         def __init__(self, *args, **kwargs):
             if calls is not None:
                 calls.append(kwargs)
+            self._kwargs = kwargs
+            self._args = args
 
         def ask(self):
-            return queue.pop(0)
+            value = queue.pop(0)
+            if value == "__first__":
+                choices = self._kwargs.get("choices") or (
+                    self._args[1] if len(self._args) > 1 else []
+                )
+                return choices[0].value
+            return value
 
     return MockSelect
 
 
+def _set_up_fake_home_with_session(tmp_path, monkeypatch, cwd_dir=None):
+    """Build a fake ~/.claude/projects/<x>/<id>.jsonl pointing at cwd_dir.
+
+    Returns (fake_home, project_cwd, session_file). The session file's cwd
+    is `cwd_dir` (must exist for resume tests; created if not given).
+    """
+    fake_home = tmp_path / "home"
+    fake_home.mkdir()
+    monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+    if cwd_dir is None:
+        cwd_dir = tmp_path / "real-project"
+        cwd_dir.mkdir()
+
+    project_dir = fake_home / ".claude" / "projects" / "test-project"
+    project_dir.mkdir(parents=True)
+    session_file = project_dir / "abc-123.jsonl"
+    session_file.write_text(
+        '{"type":"summary","summary":"Test"}\n'
+        f'{{"type":"user","cwd":"{cwd_dir}","message":{{"content":"hi"}}}}\n'
+    )
+    return fake_home, cwd_dir, session_file
+
+
 class TestLocalSessionCLI:
-    """Tests for CLI behavior with local sessions."""
+    """End-to-end CLI tests. Discovery runs for real against tmp fixtures;
+    only the interactive picker callbacks are mocked."""
 
     def test_local_html_action_generates_transcript(self, tmp_path, monkeypatch):
-        """Picking 'html' (h) on a session triggers HTML generation."""
         from click.testing import CliRunner
         from claude_code_transcripts import cli
         import claude_code_transcripts as ct
         import questionary
 
-        project_dir = tmp_path / ".claude" / "projects" / "test-project"
-        project_dir.mkdir(parents=True)
+        _, _, _ = _set_up_fake_home_with_session(tmp_path, monkeypatch)
 
-        session_file = project_dir / "session-123.jsonl"
-        session_file.write_text(
-            '{"type":"summary","summary":"Test local session"}\n'
-            '{"type":"user","cwd":"/Users/x","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}\n'
-        )
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(questionary, "select", _make_mock_select(["__first__"]))
         monkeypatch.setattr(
-            questionary,
-            "select",
-            _make_mock_select([{"name": "test-project", "paths": [project_dir]}]),
-        )
-        # The session-step picker returns (filepath, action). Force the
-        # html action so the rest of the existing render flow runs.
-        monkeypatch.setattr(
-            ct, "select_session_action", lambda entries: (session_file, "html")
+            ct, "select_session_action", lambda entries: (entries[0], "html")
         )
 
-        runner = CliRunner()
-        result = runner.invoke(cli, ["local"])
-
-        assert result.exit_code == 0
+        result = CliRunner().invoke(cli, ["local"])
+        assert result.exit_code == 0, result.output
         assert "Loading projects" in result.output
         assert "Generated" in result.output
 
-    def test_local_resume_action_invokes_claude(self, tmp_path, monkeypatch):
-        """Picking the default Enter (resume) action chdir's to the cwd
-        recorded in the JSONL and exec's claude with skip-permissions."""
+    def test_local_resume_claude(self, tmp_path, monkeypatch):
+        """Default Enter (resume) chdir's to cwd and exec's claude with
+        skip-permissions."""
         from click.testing import CliRunner
         from claude_code_transcripts import cli
         import claude_code_transcripts as ct
         import questionary
 
-        project_dir = tmp_path / ".claude" / "projects" / "test-project"
-        project_dir.mkdir(parents=True)
-        # The cwd the JSONL claims must actually exist for resume to proceed.
-        real_cwd = tmp_path / "real-project"
-        real_cwd.mkdir()
+        _, real_cwd, _ = _set_up_fake_home_with_session(tmp_path, monkeypatch)
 
-        session_file = project_dir / "abc-123.jsonl"
-        session_file.write_text(
-            '{"type":"summary","summary":"Test session"}\n'
-            f'{{"type":"user","cwd":"{real_cwd}","message":{{"content":"Hi"}}}}\n'
-        )
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(questionary, "select", _make_mock_select(["__first__"]))
         monkeypatch.setattr(
-            questionary,
-            "select",
-            _make_mock_select([{"name": "test-project", "paths": [project_dir]}]),
-        )
-        monkeypatch.setattr(
-            ct, "select_session_action", lambda entries: (session_file, "resume")
+            ct, "select_session_action", lambda entries: (entries[0], "resume")
         )
 
-        # Capture the exec call instead of actually replacing the process.
         exec_calls = []
+        monkeypatch.setattr(
+            ct.os,
+            "execvp",
+            lambda file, args: exec_calls.append((file, args, os.getcwd())),
+        )
 
-        def fake_execvp(file, args):
-            exec_calls.append((file, args, os.getcwd()))
-
-        monkeypatch.setattr(ct.os, "execvp", fake_execvp)
-
-        runner = CliRunner()
-        result = runner.invoke(cli, ["local"])
-
+        result = CliRunner().invoke(cli, ["local"])
         assert result.exit_code == 0, result.output
         assert len(exec_calls) == 1
         file, args, cwd_at_exec = exec_calls[0]
         assert file == "claude"
-        assert args[0] == "claude"
         assert "--dangerously-skip-permissions" in args
         assert "--resume" in args
-        assert "abc-123" in args
+        assert args[-1] == "abc-123"
         assert cwd_at_exec == str(real_cwd)
 
+    def test_local_resume_codex(self, tmp_path, monkeypatch):
+        """Resume on a codex session execs `codex resume <id>` instead."""
+        from click.testing import CliRunner
+        from claude_code_transcripts import cli
+        import claude_code_transcripts as ct
+        import questionary
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        real_cwd = tmp_path / "real-project"
+        real_cwd.mkdir()
+
+        codex_dir = fake_home / ".codex" / "sessions" / "2026" / "01" / "01"
+        codex_dir.mkdir(parents=True)
+        codex_file = codex_dir / "rollout-2026-01-01T00-00-00-codex-uuid.jsonl"
+        codex_file.write_text(
+            '{"type":"session_meta","payload":'
+            f'{{"id":"codex-uuid","cwd":"{real_cwd}"}}}}\n'
+        )
+
+        monkeypatch.setattr(questionary, "select", _make_mock_select(["__first__"]))
+        monkeypatch.setattr(
+            ct, "select_session_action", lambda entries: (entries[0], "resume")
+        )
+
+        exec_calls = []
+        monkeypatch.setattr(
+            ct.os,
+            "execvp",
+            lambda file, args: exec_calls.append((file, args)),
+        )
+
+        result = CliRunner().invoke(cli, ["local"])
+        assert result.exit_code == 0, result.output
+        assert exec_calls == [("codex", ["codex", "resume", "codex-uuid"])]
+
+    def test_local_html_on_codex_shows_unsupported(self, tmp_path, monkeypatch):
+        """Pressing h on a codex session prints the not-yet-supported note
+        and returns without trying to render."""
+        from click.testing import CliRunner
+        from claude_code_transcripts import cli
+        import claude_code_transcripts as ct
+        import questionary
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        codex_dir = fake_home / ".codex" / "sessions" / "2026" / "01" / "01"
+        codex_dir.mkdir(parents=True)
+        codex_file = codex_dir / "rollout-2026-01-01T00-00-00-codex-uuid.jsonl"
+        codex_file.write_text(
+            '{"type":"session_meta","payload":'
+            '{"id":"codex-uuid","cwd":"/Users/x/Code/foo"}}\n'
+        )
+
+        monkeypatch.setattr(questionary, "select", _make_mock_select(["__first__"]))
+        monkeypatch.setattr(
+            ct, "select_session_action", lambda entries: (entries[0], "html")
+        )
+
+        result = CliRunner().invoke(cli, ["local"])
+        assert result.exit_code == 0, result.output
+        assert "not supported for codex" in result.output.lower()
+
     def test_local_handles_cancelled_project_selection(self, tmp_path, monkeypatch):
-        """Cancelling at the project picker exits with a friendly message."""
         from click.testing import CliRunner
         from claude_code_transcripts import cli
         import questionary
 
-        project_dir = tmp_path / ".claude" / "projects" / "test-project"
-        project_dir.mkdir(parents=True)
-
-        session_file = project_dir / "session-123.jsonl"
-        session_file.write_text(
-            '{"type":"summary","summary":"Test session"}\n'
-            '{"type":"user","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}\n'
-        )
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        _set_up_fake_home_with_session(tmp_path, monkeypatch)
         monkeypatch.setattr(questionary, "select", _make_mock_select([None]))
 
-        runner = CliRunner()
-        result = runner.invoke(cli, ["local"])
-
+        result = CliRunner().invoke(cli, ["local"])
         assert result.exit_code == 0
         assert "No project selected" in result.output
 
     def test_local_handles_cancelled_session_selection(self, tmp_path, monkeypatch):
-        """Cancelling at the session picker (Esc) exits cleanly."""
         from click.testing import CliRunner
         from claude_code_transcripts import cli
         import claude_code_transcripts as ct
         import questionary
 
-        project_dir = tmp_path / ".claude" / "projects" / "test-project"
-        project_dir.mkdir(parents=True)
-
-        session_file = project_dir / "session-123.jsonl"
-        session_file.write_text(
-            '{"type":"summary","summary":"Test session"}\n'
-            '{"type":"user","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}\n'
-        )
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
-        monkeypatch.setattr(
-            questionary,
-            "select",
-            _make_mock_select([{"name": "test-project", "paths": [project_dir]}]),
-        )
+        _set_up_fake_home_with_session(tmp_path, monkeypatch)
+        monkeypatch.setattr(questionary, "select", _make_mock_select(["__first__"]))
         monkeypatch.setattr(ct, "select_session_action", lambda entries: None)
 
-        runner = CliRunner()
-        result = runner.invoke(cli, ["local"])
-
+        result = CliRunner().invoke(cli, ["local"])
         assert result.exit_code == 0
         assert "No session selected" in result.output
 
     def test_project_picker_has_search_filter_enabled(self, tmp_path, monkeypatch):
-        """The project picker (still on questionary) keeps type-to-filter so
-        users with many projects can narrow the list quickly. Pinned to
-        catch accidental regressions during refactors."""
+        """The project picker (still on questionary) keeps type-to-filter."""
         from click.testing import CliRunner
         from claude_code_transcripts import cli
         import claude_code_transcripts as ct
         import questionary
 
-        project_dir = tmp_path / ".claude" / "projects" / "test-project"
-        project_dir.mkdir(parents=True)
-
-        session_file = project_dir / "session-123.jsonl"
-        session_file.write_text(
-            '{"type":"summary","summary":"Test session"}\n'
-            '{"type":"user","cwd":"/Users/x","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}\n'
-        )
-
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        _set_up_fake_home_with_session(tmp_path, monkeypatch)
         calls = []
         monkeypatch.setattr(
             questionary,
             "select",
-            _make_mock_select(
-                [{"name": "test-project", "paths": [project_dir]}],
-                calls=calls,
-            ),
+            _make_mock_select(["__first__"], calls=calls),
         )
         monkeypatch.setattr(
-            ct, "select_session_action", lambda entries: (session_file, "html")
+            ct, "select_session_action", lambda entries: (entries[0], "html")
         )
 
-        runner = CliRunner()
-        result = runner.invoke(cli, ["local"])
-
+        result = CliRunner().invoke(cli, ["local"])
         assert result.exit_code == 0
-        assert len(calls) == 1, "expected one questionary.select call (project)"
+        assert len(calls) == 1
         assert calls[0].get("use_search_filter") is True
 
 
@@ -1948,40 +2059,37 @@ class TestOutputAutoOption:
         assert len(opened_urls) == 0  # No browser opened
 
     def test_local_output_auto_creates_subdirectory(self, tmp_path, monkeypatch):
-        """Test that local -a creates output subdirectory named after file stem."""
+        """`local -a` creates an output subdirectory named after the
+        chosen session's stem."""
         from click.testing import CliRunner
         from claude_code_transcripts import cli
         import claude_code_transcripts as ct
         import questionary
 
-        # Create mock .claude/projects structure
-        project_dir = tmp_path / ".claude" / "projects" / "test-project"
-        project_dir.mkdir(parents=True)
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
 
+        cwd_dir = tmp_path / "real-cwd"
+        cwd_dir.mkdir()
+        project_dir = fake_home / ".claude" / "projects" / "test-project"
+        project_dir.mkdir(parents=True)
         session_file = project_dir / "my-session-file.jsonl"
         session_file.write_text(
-            '{"type":"summary","summary":"Test local session"}\n'
-            '{"type":"user","cwd":"/Users/x","timestamp":"2025-01-01T00:00:00Z","message":{"role":"user","content":"Hello"}}\n'
+            '{"type":"summary","summary":"Test"}\n'
+            f'{{"type":"user","cwd":"{cwd_dir}","message":{{"content":"hi"}}}}\n'
         )
 
         output_parent = tmp_path / "output"
         output_parent.mkdir()
 
-        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        monkeypatch.setattr(questionary, "select", _make_mock_select(["__first__"]))
         monkeypatch.setattr(
-            questionary,
-            "select",
-            _make_mock_select([{"name": "test-project", "paths": [project_dir]}]),
-        )
-        monkeypatch.setattr(
-            ct, "select_session_action", lambda entries: (session_file, "html")
+            ct, "select_session_action", lambda entries: (entries[0], "html")
         )
 
-        runner = CliRunner()
-        result = runner.invoke(cli, ["local", "-a", "-o", str(output_parent)])
-
-        assert result.exit_code == 0
-        # Output should be in output_parent/my-session-file/
+        result = CliRunner().invoke(cli, ["local", "-a", "-o", str(output_parent)])
+        assert result.exit_code == 0, result.output
         expected_dir = output_parent / "my-session-file"
         assert expected_dir.exists()
         assert (expected_dir / "index.html").exists()

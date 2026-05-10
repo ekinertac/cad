@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections import defaultdict
 import webbrowser
 from datetime import datetime
 from pathlib import Path
@@ -217,10 +218,12 @@ def select_session_action(sessions):
     ``html`` (h). Modal search is opened with ``/`` so plain typing can't
     coexist with ``h`` as a hotkey — the same pattern fzf/htop use.
 
-    Each entry in ``sessions`` must be a dict with ``display`` (string) and
-    ``filepath`` (Path). Returns ``(filepath, action)`` or ``None`` if the
-    user cancelled. Built directly on prompt_toolkit because questionary's
-    select doesn't expose per-key action binding.
+    Each entry in ``sessions`` must be a dict with at least ``display``
+    (string) populated; the full dict is passed back to the caller so it
+    has access to provider/cwd/session_id for dispatch. Returns
+    ``(session_dict, action)`` or ``None`` if the user cancelled.
+    Built directly on prompt_toolkit because questionary's select doesn't
+    expose per-key action binding.
     """
     from prompt_toolkit import Application
     from prompt_toolkit.filters import Condition
@@ -318,10 +321,7 @@ def select_session_action(sessions):
             return
         # Enter in search mode does both: confirm filter AND pick (resume).
         state["search_mode"] = False
-        state["result"] = (
-            sessions[indices[state["selected"]]]["filepath"],
-            "resume",
-        )
+        state["result"] = (sessions[indices[state["selected"]]], "resume")
         event.app.exit()
 
     @kb.add("h", filter=not_searching)
@@ -329,10 +329,7 @@ def select_session_action(sessions):
         indices = filtered_indices()
         if not indices:
             return
-        state["result"] = (
-            sessions[indices[state["selected"]]]["filepath"],
-            "html",
-        )
+        state["result"] = (sessions[indices[state["selected"]]], "html")
         event.app.exit()
 
     @kb.add("/", filter=not_searching)
@@ -389,34 +386,37 @@ def select_session_action(sessions):
     return state["result"]
 
 
-def resume_session(jsonl_path):
-    """Replace this process with ``claude --dangerously-skip-permissions
-    --resume <session-id>`` after chdir'ing to the cwd recorded in the JSONL.
-    Skip-permissions is intentional: permission prompts in long sessions
-    devolve into rubber-stamping (alarm fatigue). Never returns on success.
+PROVIDER_RESUME_COMMANDS = {
+    # The agent CLI to exec for each provider, plus the static flags. The
+    # session id is appended at call time. Skip-permissions on claude is
+    # intentional — long sessions devolve into rubber-stamping prompts.
+    "claude": ["claude", "--dangerously-skip-permissions", "--resume"],
+    "codex": ["codex", "resume"],
+}
 
-    A child process can't change its parent shell's working directory.
-    To make the shell end up in the project folder after claude exits,
-    the user installs the wrapper printed by ``cct shell-init``: it sets
-    ``CCT_CWD_FILE`` to a temp path; we write the target cwd there before
-    exec'ing claude, and the shell function reads it after exit and cd's.
+
+def resume_session(session):
+    """Replace this process with the appropriate provider's resume command
+    after chdir'ing to the cwd recorded in the session. Never returns on
+    success.
+
+    A child process can't change its parent shell's working directory; the
+    optional shell wrapper installed via ``cct shell-init`` reads
+    ``$CCT_CWD_FILE`` after the agent exits and cd's the parent shell.
     """
-    cwd = get_session_cwd(jsonl_path)
-    if cwd is None:
-        click.echo(
-            f"Could not recover working directory from {jsonl_path.name}.",
-            err=True,
-        )
+    provider = session["provider"]
+    cwd = session["cwd"]
+    session_id = session["session_id"]
+
+    if provider not in PROVIDER_RESUME_COMMANDS:
+        click.echo(f"Unknown provider: {provider}", err=True)
         sys.exit(1)
     if not Path(cwd).is_dir():
         click.echo(f"Original project directory no longer exists: {cwd}", err=True)
         sys.exit(1)
-    session_id = jsonl_path.stem
-    click.echo(f"Resuming {session_id} in {cwd}...")
 
-    # Pass cwd back to the parent shell via the wrapper's temp file (if any).
-    # Don't fail the resume if writing the breadcrumb fails — claude still
-    # runs; the user just won't get the post-exit cd.
+    click.echo(f"Resuming {provider} session {session_id} in {cwd}...")
+
     cwd_file = os.environ.get("CCT_CWD_FILE")
     if cwd_file:
         try:
@@ -425,10 +425,8 @@ def resume_session(jsonl_path):
             pass
 
     os.chdir(cwd)
-    os.execvp(
-        "claude",
-        ["claude", "--dangerously-skip-permissions", "--resume", session_id],
-    )
+    cmd = PROVIDER_RESUME_COMMANDS[provider] + [session_id]
+    os.execvp(cmd[0], cmd)
 
 
 # `command cct` in the wrapper skips this function so the binary runs once.
@@ -499,106 +497,276 @@ def _prune_temp_outputs(parent, keep):
             pass
 
 
-def _global_session_folder_names():
-    """Raw folder names that should merge into the virtual 'Global Sessions'
-    project. Currently the user's home dir and ~/Code — these are catch-all
-    locations for one-off questions, not real project folders. Computed from
-    Path.home() so the rule generalises across machines.
+def _global_session_cwds():
+    """``cwd`` values that should merge into the virtual 'Global Sessions'
+    project — the user's home dir and ~/Code, the two catch-all places for
+    one-off questions. Returned as strings since cwd values from JSONLs are
+    strings; comparison is exact-match.
     """
-    home_encoded = str(Path.home()).replace("/", "-")
-    return {home_encoded, f"{home_encoded}-Code"}
+    home = str(Path.home())
+    return {home, str(Path(home) / "Code")}
 
 
-def find_local_projects(folder):
-    """Discover top-level project folders under ``folder`` for the two-step
-    picker. Reads only filesystem metadata — never opens session files — so
-    the project picker stays cheap regardless of how many sessions exist.
+def find_claude_sessions(projects_folder):
+    """Return a flat list of claude session dicts under ``projects_folder``.
 
-    Returns a list of dicts sorted by ``latest_mtime`` descending::
+    Each dict has the provider-agnostic shape used by the project picker::
 
         {
-            "name":         "foo",                       # display name via get_project_display_name
-            "raw_name":     "-Users-x-Code-foo",         # unmodified folder name (None for virtual)
-            "path":         Path(...),                   # the project folder (None for virtual)
-            "paths":        [Path(...), ...],            # always populated; multi-element for virtual
-            "session_count": 3,                          # JSONLs excluding agent-*
-            "latest_mtime": 1700000000.0,
-            "display":      "foo                  2026-05-10 14:02   3 sessions",
+            "provider":   "claude",
+            "session_id": "<uuid>",          # for `claude --resume`
+            "filepath":   Path(...),
+            "cwd":        "/Users/x/Code/foo",
+            "mtime":      1700000000.0,
+            "size":       42000,
+            "summary":    None,              # lazy — load_session_summary fills
+            "display":    None,              # lazy — generated from summary
         }
 
-    Folders matching :func:`_global_session_folder_names` (home and ~/Code)
-    do not appear as separate entries — their sessions are aggregated under
-    a single virtual project named "Global Sessions". When two real projects
-    collapse to the same display name, both rows get a trailing
-    ``  (raw_name)`` disambiguator so the user can tell them apart.
+    Sessions without a recoverable ``cwd`` (warmups, broken files,
+    agent-* invocations) are skipped: the picker can't merge them into a
+    project meaningfully without a directory.
     """
-    folder = Path(folder)
-    if not folder.exists():
+    projects_folder = Path(projects_folder)
+    if not projects_folder.exists():
         return []
 
-    global_names = _global_session_folder_names()
-    projects = []
-    global_paths = []
-    global_total_sessions = 0
-    global_latest_mtime = 0.0
-
-    for child in folder.iterdir():
-        if not child.is_dir():
+    out = []
+    for f in projects_folder.glob("*/*.jsonl"):
+        if f.name.startswith("agent-"):
+            continue
+        cwd = get_session_cwd(f)
+        if not cwd:
             continue
         try:
-            jsonls = [
-                f for f in child.glob("*.jsonl") if not f.name.startswith("agent-")
-            ]
+            st = f.stat()
         except OSError:
-            # Unreadable folder — skip silently, matching find_local_sessions
             continue
-        if not jsonls:
-            continue
-        latest_mtime = max(f.stat().st_mtime for f in jsonls)
+        out.append(
+            {
+                "provider": "claude",
+                "session_id": f.stem,
+                "filepath": f,
+                "cwd": cwd,
+                "mtime": st.st_mtime,
+                "size": st.st_size,
+                "summary": None,
+                "display": None,
+            }
+        )
+    return out
 
-        if child.name in global_names:
-            global_paths.append(child)
-            global_total_sessions += len(jsonls)
-            global_latest_mtime = max(global_latest_mtime, latest_mtime)
-            continue
 
+def find_codex_sessions(root=None):
+    """Return a flat list of codex session dicts under ``root`` (default
+    ``~/.codex/sessions``). Codex stores sessions in a date-organized tree
+    (``YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl``) and the first JSONL line is
+    a ``session_meta`` event whose ``payload`` carries both ``id`` (for
+    ``codex resume``) and ``cwd`` — so a single readline is enough.
+
+    Same dict shape as :func:`find_claude_sessions`, with provider="codex".
+    """
+    if root is None:
+        root = Path.home() / ".codex" / "sessions"
+    root = Path(root)
+    if not root.exists():
+        return []
+
+    out = []
+    for f in root.glob("*/*/*/rollout-*.jsonl"):
+        try:
+            with open(f, "r", encoding="utf-8") as fh:
+                meta = json.loads(fh.readline())
+        except (OSError, json.JSONDecodeError):
+            continue
+        payload = (meta or {}).get("payload") or {}
+        sid = payload.get("id")
+        cwd = payload.get("cwd")
+        if not sid or not cwd:
+            continue
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        out.append(
+            {
+                "provider": "codex",
+                "session_id": sid,
+                "filepath": f,
+                "cwd": cwd,
+                "mtime": st.st_mtime,
+                "size": st.st_size,
+                "summary": None,
+                "display": None,
+            }
+        )
+    return out
+
+
+def get_codex_summary(filepath, max_length=200):
+    """First user prompt from a codex JSONL — the first ``event_msg`` whose
+    payload type is ``user_message``. Returns ``"(no prompt)"`` if none
+    found. Codex injects synthetic user messages for skill-loader warnings
+    at session start, so the first real user prompt is sometimes the second
+    or third user_message event; the function scans linearly which is good
+    enough for the picker.
+    """
+    try:
+        with open(filepath, "r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(d, dict):
+                    continue
+                if d.get("type") != "event_msg":
+                    continue
+                p = d.get("payload") or {}
+                if p.get("type") != "user_message":
+                    continue
+                msg = (p.get("message") or "").strip()
+                if not msg:
+                    continue
+                first_line = msg.split("\n", 1)[0]
+                if len(first_line) > max_length:
+                    first_line = first_line[: max_length - 3] + "..."
+                return first_line
+    except OSError:
+        pass
+    return "(no prompt)"
+
+
+def load_session_summary(session):
+    """Populate ``session['summary']`` and ``session['display']`` in place.
+
+    Summaries are loaded lazily so the project picker (which only needs cwd
+    + mtime + size) stays cheap. Once the user picks a project we hydrate
+    every session in it just before showing the session picker.
+    """
+    if session["summary"] is not None:
+        return
+    if session["provider"] == "claude":
+        session["summary"] = get_session_summary(session["filepath"])
+    elif session["provider"] == "codex":
+        session["summary"] = get_codex_summary(session["filepath"])
+    else:
+        session["summary"] = "(unknown provider)"
+
+    summary = session["summary"]
+    if len(summary) > 50:
+        summary = summary[:47] + "..."
+    mtime = datetime.fromtimestamp(session["mtime"])
+    date_str = mtime.strftime("%Y-%m-%d %H:%M")
+    size_kb = session["size"] / 1024
+    badge = "[c]" if session["provider"] == "claude" else "[x]"
+    session["display"] = f"{date_str}  {size_kb:5.0f} KB  {badge}  {summary}"
+
+
+def find_local_projects(folder=None):
+    """Discover all sessions across providers and group them by ``cwd`` into
+    project dicts for the two-step picker.
+
+    The grouping key is the JSONL's recorded ``cwd`` rather than the
+    encoded folder name, so claude and codex sessions in the same directory
+    end up in a single project entry. Sessions whose cwd matches the
+    'Global Sessions' rule (home or ~/Code) collapse into a single virtual
+    entry.
+
+    The ``folder`` argument is accepted for backward compatibility but is
+    typically unused — claude sessions come from ``~/.claude/projects`` and
+    codex sessions from ``~/.codex/sessions`` regardless.
+
+    Each project dict::
+
+        {
+            "name":          "foo",                      # cwd basename, or "Global Sessions"
+            "cwd":           "/Users/x/Code/foo",        # None for the virtual entry
+            "sessions":      [<session dict>, ...],      # sorted newest-first
+            "session_count": 3,
+            "latest_mtime":  1700000000.0,
+            "n_claude":      2,                          # for the badge
+            "n_codex":       1,
+            "display":       "foo            2026-05-10 14:02   3 sessions  (2c+1x)",
+        }
+    """
+    if folder is None:
+        folder = Path.home() / ".claude" / "projects"
+    sessions = find_claude_sessions(folder) + find_codex_sessions()
+    return _group_sessions_into_projects(sessions)
+
+
+def _group_sessions_into_projects(sessions):
+    """Pure grouping function — given a flat session list (any providers),
+    group by cwd, apply the Global Sessions rule, and build display rows.
+    Split out from ``find_local_projects`` so it's trivially testable.
+    """
+    global_cwds = _global_session_cwds()
+    by_cwd = defaultdict(list)
+    global_sessions = []
+
+    for s in sessions:
+        if s["cwd"] in global_cwds:
+            global_sessions.append(s)
+        else:
+            by_cwd[s["cwd"]].append(s)
+
+    projects = []
+    for cwd, sess in by_cwd.items():
+        sess.sort(key=lambda x: x["mtime"], reverse=True)
+        n_claude = sum(1 for s in sess if s["provider"] == "claude")
+        n_codex = sum(1 for s in sess if s["provider"] == "codex")
         projects.append(
             {
-                "name": get_project_display_name(child.name),
-                "raw_name": child.name,
-                "path": child,
-                "paths": [child],
-                "session_count": len(jsonls),
-                "latest_mtime": latest_mtime,
+                "name": Path(cwd).name or cwd,
+                "cwd": cwd,
+                "sessions": sess,
+                "session_count": len(sess),
+                "latest_mtime": sess[0]["mtime"],
+                "n_claude": n_claude,
+                "n_codex": n_codex,
             }
         )
 
-    if global_paths:
+    if global_sessions:
+        global_sessions.sort(key=lambda x: x["mtime"], reverse=True)
+        n_claude = sum(1 for s in global_sessions if s["provider"] == "claude")
+        n_codex = sum(1 for s in global_sessions if s["provider"] == "codex")
         projects.append(
             {
                 "name": "Global Sessions",
-                "raw_name": None,
-                "path": None,
-                "paths": global_paths,
-                "session_count": global_total_sessions,
-                "latest_mtime": global_latest_mtime,
+                "cwd": None,
+                "sessions": global_sessions,
+                "session_count": len(global_sessions),
+                "latest_mtime": global_sessions[0]["mtime"],
+                "n_claude": n_claude,
+                "n_codex": n_codex,
             }
         )
 
     projects.sort(key=lambda p: p["latest_mtime"], reverse=True)
 
-    # Detect display-name collisions so we can disambiguate just those rows
-    name_counts = {}
+    # Disambiguate name collisions (two real projects whose basename matches)
+    # by appending the full cwd to the colliding rows only.
+    name_counts = defaultdict(int)
     for p in projects:
-        name_counts[p["name"]] = name_counts.get(p["name"], 0) + 1
+        name_counts[p["name"]] += 1
 
     for p in projects:
         date_str = datetime.fromtimestamp(p["latest_mtime"]).strftime("%Y-%m-%d %H:%M")
         plural = "session" if p["session_count"] == 1 else "sessions"
-        line = f"{p['name']:<30} {date_str}   {p['session_count']} {plural}"
-        # Virtual project never collides (unique name) and has no raw_name to show.
-        if name_counts[p["name"]] > 1 and p["raw_name"] is not None:
-            line = f"{line}   ({p['raw_name']})"
+        badges = []
+        if p["n_claude"]:
+            badges.append(f"{p['n_claude']}c")
+        if p["n_codex"]:
+            badges.append(f"{p['n_codex']}x")
+        badge_str = "+".join(badges) if badges else ""
+        line = (
+            f"{p['name']:<28} {date_str}   {p['session_count']} {plural}"
+            f"  ({badge_str})"
+        )
+        if name_counts[p["name"]] > 1 and p["cwd"] is not None:
+            line = f"{line}   {p['cwd']}"
         p["display"] = line
 
     return projects
@@ -2018,33 +2186,32 @@ def shell_init_cmd(shell):
     help="Open the generated index.html in your default browser (default if no -o specified).",
 )
 def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
-    """Select a local Claude Code session and either resume it or render
-    it to HTML.
+    """Select a local agent session and either resume it or render to HTML.
 
-    The picker is two-step. First choose a project folder under
-    ~/.claude/projects (questionary, with type-to-filter). Then choose a
-    session within it (custom picker). On the session step:
+    Sessions from claude (``~/.claude/projects/``) and codex
+    (``~/.codex/sessions/``) are merged by their recorded ``cwd`` so a
+    project entry shows the combined session count regardless of which
+    agent CLI you used. Provider is shown via a small badge per row
+    (``[c]`` / ``[x]``).
 
-    - Enter resumes the session — chdir to its original cwd and exec
-      ``claude --dangerously-skip-permissions --resume <id>``.
-    - h renders the session to HTML using the existing flags
-      (``-o``, ``--gist``, ``--repo``, ``--open``, ``--json``).
+    Two-step picker. First choose a project (questionary, with
+    type-to-filter). Then choose a session (custom picker):
 
-    Project metadata is gathered without reading session summaries so the
+    - Enter resumes — chdir to the recorded cwd and exec the right agent
+      CLI (``claude --dangerously-skip-permissions --resume`` for claude,
+      ``codex resume`` for codex).
+    - h renders the session to HTML. Currently only claude sessions can
+      be rendered; pressing h on a codex session prints a 'not yet
+      supported' message and returns.
+
+    Session summaries are loaded only after a project is picked, so the
     first picker stays cheap even with hundreds of sessions on disk.
     """
-    projects_folder = Path.home() / ".claude" / "projects"
-
-    if not projects_folder.exists():
-        click.echo(f"Projects folder not found: {projects_folder}")
-        click.echo("No local Claude Code sessions available.")
-        return
-
     click.echo("Loading projects...")
-    projects = find_local_projects(projects_folder)
+    projects = find_local_projects()
 
     if not projects:
-        click.echo("No local projects found.")
+        click.echo("No local sessions found.")
         return
 
     project_choices = [
@@ -2062,45 +2229,36 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
         click.echo("No project selected.")
         return
 
-    # Read summaries only for the chosen project — the speed win.
-    # `paths` is always a list (single-element for real projects, multi-element
-    # for the virtual "Global Sessions" entry that merges ~/ and ~/Code).
-    results = []
-    for path in selected_project["paths"]:
-        results.extend(find_local_sessions(path, limit=None))
-    results.sort(key=lambda x: x[0].stat().st_mtime, reverse=True)
-
-    if not results:
+    sessions = selected_project["sessions"]
+    if not sessions:
         click.echo(f"No sessions in {selected_project['name']}.")
         return
 
-    session_entries = []
-    for filepath, summary in results:
-        stat = filepath.stat()
-        mod_time = datetime.fromtimestamp(stat.st_mtime)
-        size_kb = stat.st_size / 1024
-        date_str = mod_time.strftime("%Y-%m-%d %H:%M")
-        if len(summary) > 50:
-            summary = summary[:47] + "..."
-        display = f"{date_str}  {size_kb:5.0f} KB  {summary}"
-        session_entries.append({"display": display, "filepath": filepath})
+    # Hydrate summaries only now (after the project pick), so opening the
+    # project picker stays cheap regardless of total session count.
+    for s in sessions:
+        load_session_summary(s)
 
-    picked = select_session_action(session_entries)
+    picked = select_session_action(sessions)
     if picked is None:
         click.echo("No session selected.")
         return
 
-    session_file, action = picked
+    session, action = picked
 
     if action == "resume":
         # Replaces the current process — does not return.
-        resume_session(session_file)
+        resume_session(session)
         return
 
     # action == "html"
+    if session["provider"] != "claude":
+        click.echo(f"HTML render not supported for {session['provider']} sessions yet.")
+        return
+
+    session_file = session["filepath"]
     auto_open = output is None and not gist and not output_auto
     if output_auto:
-        # Use -o as parent dir (or current dir), with auto-named subdirectory
         parent_dir = Path(output) if output else Path(".")
         output = parent_dir / session_file.stem
     elif output is None:
