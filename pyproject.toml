@@ -25,6 +25,7 @@ CI = "https://github.com/simonw/claude-code-transcripts/actions"
 
 [project.scripts]
 claude-code-transcripts = "claude_code_transcripts:main"
+cct = "claude_code_transcripts:main"
 
 [build-system]
 requires = ["uv_build>=0.9.7,<0.10.0"]
