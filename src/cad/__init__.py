@@ -3017,15 +3017,54 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
     # Outer loop covers project → session → (back) → project navigation.
     # Esc/Bksp on the session picker returns the user here instead of
     # quitting; q on either picker still hard-quits.
+    project_idx = 0
     while True:
         # Project picker uses the same custom picker as the session step
         # so the search UX is consistent (`/` opens search in both). No
-        # back_action: Esc here means quit.
-        picked = select_entry(projects, actions={"enter": "open"})
+        # back_action: Esc here means quit. `r` bulk-moves every session
+        # in a project to a new cwd — for when you've renamed the folder
+        # on disk (`mv ~/Code/foo ~/Code/bar`) and want every session to
+        # point at the new location in one go.
+        picked = select_entry(
+            projects,
+            actions={"enter": "open", "r": "rename"},
+            initial_selected=project_idx,
+        )
         if picked is None:
             click.echo("No project selected.")
             return
-        selected_project, _ = picked
+        selected_project, project_action = picked
+        try:
+            project_idx = projects.index(selected_project)
+        except ValueError:
+            project_idx = 0
+
+        if project_action == "rename":
+            # Bulk cwd-override for every session in this project. Reuses
+            # the same prompt + validation as the per-session `m` action.
+            current = selected_project["cwd"] or ""
+            new_cwd = prompt_for_cwd(default=current)
+            if new_cwd is None:  # cancel
+                continue
+            project_sessions = selected_project["sessions"]
+            for s in project_sessions:
+                save_cwd_override(s["provider"], s["session_id"], new_cwd)
+            verb = "Moved" if new_cwd else "Cleared override for"
+            click.echo(
+                f"{verb} {len(project_sessions)} session(s) "
+                f"in {selected_project['name']} "
+                f"to {new_cwd or '(no override)'}"
+            )
+            # Re-discover so the picker reflects the new grouping.
+            projects = find_local_projects()
+            # Try to keep the cursor on the renamed project's new home if it
+            # still appears (it will when new_cwd != ""), otherwise reset.
+            if new_cwd:
+                project_idx = next(
+                    (i for i, p in enumerate(projects) if p["cwd"] == new_cwd),
+                    0,
+                )
+            continue
 
         sessions = selected_project["sessions"]
         if not sessions:

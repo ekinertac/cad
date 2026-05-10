@@ -2507,6 +2507,54 @@ class TestLocalSessionCLI:
         assert call_count["n"] == 3, call_count
         assert "No project selected" in result.output
 
+    def test_project_rename_bulk_moves_all_sessions(self, tmp_path, monkeypatch):
+        """Pressing r on the project picker writes a cwd override for every
+        session in that project — for when you've renamed the folder on
+        disk and want all sessions to follow in one keystroke."""
+        from click.testing import CliRunner
+        from cad import cli
+        import cad as ct
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        proj_dir = fake_home / ".claude" / "projects" / "test-project"
+        proj_dir.mkdir(parents=True)
+        old_cwd = "/Users/x/Code/old-name"
+        session_ids = []
+        for i in range(3):
+            sid = f"sess-{i}"
+            session_ids.append(sid)
+            (proj_dir / f"{sid}.jsonl").write_text(
+                '{"type":"summary","summary":"x"}\n'
+                f'{{"type":"user","cwd":"{old_cwd}","message":{{"content":"hi"}}}}\n'
+            )
+
+        new_cwd = tmp_path / "renamed-target"
+        new_cwd.mkdir()
+
+        call_count = {"n": 0}
+
+        def fake_select_entry(
+            entries, actions=None, back_action=None, initial_selected=0
+        ):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # Project picker — trigger rename on first project.
+                return entries[0], "rename"
+            # Second call: project picker again (after rename), cancel out.
+            return None
+
+        monkeypatch.setattr(ct, "select_entry", fake_select_entry)
+        monkeypatch.setattr(ct, "prompt_for_cwd", lambda default="": str(new_cwd))
+
+        result = CliRunner().invoke(cli, ["local"])
+        assert result.exit_code == 0, result.output
+
+        for sid in session_ids:
+            assert ct.get_cwd_override("claude", sid) == str(new_cwd.resolve())
+
     def test_move_action_saves_cwd_override(self, tmp_path, monkeypatch):
         """Pressing m, entering a valid path, saves the cwd override and
         marks the row as recently updated."""
