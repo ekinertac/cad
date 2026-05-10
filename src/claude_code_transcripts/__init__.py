@@ -272,7 +272,7 @@ def find_local_sessions(folder, limit=10):
     return results[:limit]
 
 
-def select_entry(entries, actions=None):
+def select_entry(entries, actions=None, back_action=None):
     """Interactive list picker with per-key actions and modal search.
 
     ``actions`` is a dict mapping key names to action labels, e.g.
@@ -281,6 +281,10 @@ def select_entry(entries, actions=None):
     opened with ``/`` so plain typing can't conflict with letter hotkeys
     (the same pattern fzf/htop use). Inside search mode, typing builds the
     filter; Enter still confirms with the primary action.
+
+    ``back_action`` (optional): when set, Esc and Backspace (outside
+    search mode) return ``(None, back_action)`` instead of cancelling.
+    ``q`` and Ctrl-C still hard-cancel either way — handy escape hatch.
 
     Each entry must be a dict with at least ``display`` populated. The full
     entry dict is passed back to the caller so it can dispatch on whatever
@@ -365,7 +369,11 @@ def select_entry(entries, actions=None):
         # Render the hint line from the actions dict so it always reflects
         # the configured keys for this picker.
         parts = [f"{'Enter' if k == 'enter' else k}={v}" for k, v in actions.items()]
-        parts += ["/=search", "q/Esc=quit"]
+        parts.append("/=search")
+        if back_action:
+            parts += ["Esc/Bksp=back", "q=quit"]
+        else:
+            parts.append("q/Esc=quit")
         return [("class:status", " " + " · ".join(parts) + "\n")]
 
     kb = KeyBindings()
@@ -426,12 +434,17 @@ def select_entry(entries, actions=None):
             state["search_mode"] = False
             state["filter"] = ""
             state["selected"] = 0
+        elif back_action:
+            # Caller wired a "go back" action — route Esc through it
+            # instead of hard-cancelling. q / Ctrl-C remain the escape
+            # hatch when the user really wants out.
+            state["result"] = (None, back_action)
+            event.app.exit()
         else:
             event.app.exit()
 
-    # `q` is a second way to cancel — handy when Esc feels far away. Only
-    # outside search mode so the user can still type `q` as part of a
-    # filter query.
+    # `q` is the unconditional cancel — only outside search mode so the
+    # user can still type `q` as part of a filter query.
     @kb.add("q", filter=not_searching)
     def _(event):
         event.app.exit()
@@ -445,6 +458,15 @@ def select_entry(entries, actions=None):
         if state["filter"]:
             state["filter"] = state["filter"][:-1]
             state["selected"] = 0
+
+    if back_action:
+        # Backspace outside search mode = same as Esc when back is enabled.
+        # This matches the user's mental model from file managers / wizards
+        # where Backspace navigates up one level.
+        @kb.add("backspace", filter=not_searching)
+        def _(event):
+            state["result"] = (None, back_action)
+            event.app.exit()
 
     @kb.add("<any>", filter=is_searching)
     def _(event):
@@ -2820,90 +2842,109 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
         click.echo("No local sessions found.")
         return
 
-    # Project picker uses the same custom picker as the session step so
-    # the search UX is consistent (`/` opens search in both).
-    picked = select_entry(projects, actions={"enter": "open"})
-    if picked is None:
-        click.echo("No project selected.")
-        return
-    selected_project, _ = picked
-
-    sessions = selected_project["sessions"]
-    if not sessions:
-        click.echo(f"No sessions in {selected_project['name']}.")
-        return
-
-    # Hydrate summaries only now (after the project pick), so opening the
-    # project picker stays cheap regardless of total session count.
-    for s in sessions:
-        load_session_summary(s)
-
-    # Loop so r/s actions can update a title and bounce back to the picker
-    # instead of forcing the user to relaunch cct after every rename.
+    # Outer loop covers project → session → (back) → project navigation.
+    # Esc/Bksp on the session picker returns the user here instead of
+    # quitting; q on either picker still hard-quits.
     while True:
-        picked = select_entry(
-            sessions,
-            actions={
-                "enter": "resume",
-                "h": "html",
-                "r": "rename",
-                "s": "summarize",
-                "m": "move",
-            },
-        )
+        # Project picker uses the same custom picker as the session step
+        # so the search UX is consistent (`/` opens search in both). No
+        # back_action: Esc here means quit.
+        picked = select_entry(projects, actions={"enter": "open"})
         if picked is None:
-            click.echo("No session selected.")
+            click.echo("No project selected.")
             return
+        selected_project, _ = picked
 
-        session, action = picked
-
-        if action == "rename":
-            new_title = prompt_for_title(default=session.get("summary") or "")
-            if new_title is None:  # Ctrl-C / EOF
-                continue
-            save_title_override(session["provider"], session["session_id"], new_title)
-            session["summary"] = new_title or None
-            session["display"] = None
-            session["_recently_updated"] = True
-            load_session_summary(session)
+        sessions = selected_project["sessions"]
+        if not sessions:
+            click.echo(f"No sessions in {selected_project['name']}.")
+            # Bounce back to project picker — empty project is recoverable.
             continue
 
-        if action == "summarize":
-            click.echo(f"Summarizing {session['session_id']}...")
-            try:
-                title = summarize_session(session)
-            except click.ClickException as e:
-                click.echo(f"Summarize failed: {e.message}", err=True)
+        # Hydrate summaries only now (after the project pick), so opening
+        # the project picker stays cheap regardless of total session count.
+        for s in sessions:
+            load_session_summary(s)
+
+        # Inner loop: r/s/m actions update a title/cwd and stay in the
+        # session picker; back returns to the outer loop (project picker).
+        went_back = False
+        while True:
+            picked = select_entry(
+                sessions,
+                actions={
+                    "enter": "resume",
+                    "h": "html",
+                    "r": "rename",
+                    "s": "summarize",
+                    "m": "move",
+                },
+                back_action="back",
+            )
+            if picked is None:
+                # q or Ctrl-C — hard quit.
+                click.echo("No session selected.")
+                return
+
+            session, action = picked
+
+            if action == "back":
+                went_back = True
+                break
+
+            if action == "rename":
+                new_title = prompt_for_title(default=session.get("summary") or "")
+                if new_title is None:  # Ctrl-C / EOF
+                    continue
+                save_title_override(
+                    session["provider"], session["session_id"], new_title
+                )
+                session["summary"] = new_title or None
+                session["display"] = None
+                session["_recently_updated"] = True
+                load_session_summary(session)
                 continue
-            save_title_override(session["provider"], session["session_id"], title)
-            session["summary"] = title
-            session["display"] = None
-            session["_recently_updated"] = True
-            load_session_summary(session)
-            click.echo(f"Saved title: {title}")
-            continue
 
-        if action == "move":
-            new_cwd = prompt_for_cwd(default=session.get("cwd") or "")
-            if new_cwd is None:  # cancel or invalid path
+            if action == "summarize":
+                click.echo(f"Summarizing {session['session_id']}...")
+                try:
+                    title = summarize_session(session)
+                except click.ClickException as e:
+                    click.echo(f"Summarize failed: {e.message}", err=True)
+                    continue
+                save_title_override(session["provider"], session["session_id"], title)
+                session["summary"] = title
+                session["display"] = None
+                session["_recently_updated"] = True
+                load_session_summary(session)
+                click.echo(f"Saved title: {title}")
                 continue
-            save_cwd_override(session["provider"], session["session_id"], new_cwd)
-            # Update the in-memory session so the row reflects the new
-            # cwd immediately — discovery will pick it up on next cct run.
-            session["cwd"] = new_cwd or session["cwd"]
-            session["display"] = None
-            session["_recently_updated"] = True
-            load_session_summary(session)
-            verb = "Moved" if new_cwd else "Cleared override for"
-            click.echo(f"{verb} session to {new_cwd or session['cwd']}")
+
+            if action == "move":
+                new_cwd = prompt_for_cwd(default=session.get("cwd") or "")
+                if new_cwd is None:  # cancel
+                    continue
+                save_cwd_override(session["provider"], session["session_id"], new_cwd)
+                session["cwd"] = new_cwd or session["cwd"]
+                session["display"] = None
+                session["_recently_updated"] = True
+                load_session_summary(session)
+                verb = "Moved" if new_cwd else "Cleared override for"
+                click.echo(f"{verb} session to {new_cwd or session['cwd']}")
+                continue
+
+            if action == "resume":
+                # Replaces the current process — does not return.
+                resume_session(session)
+                return
+
+            # action == "html" — break out, fall through to render.
+            break
+
+        if went_back:
+            # Re-enter outer loop = project picker.
             continue
-
-        if action == "resume":
-            # Replaces the current process — does not return.
-            resume_session(session)
-            return
-
-        # action == "html"
+        # Fell through with action == "html". Exit outer loop too.
         break
 
     # action == "html"

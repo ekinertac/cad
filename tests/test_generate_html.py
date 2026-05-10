@@ -2137,7 +2137,7 @@ def _make_mock_select_entry(returns):
     """
     queue = list(returns)
 
-    def fake(entries, actions=None):
+    def fake(entries, actions=None, back_action=None):
         if not queue:
             raise AssertionError("select_entry called more times than scripted")
         v = queue.pop(0)
@@ -2369,7 +2369,7 @@ class TestLocalSessionCLI:
         call_count = {"n": 0}
         captured = {}
 
-        def fake_select_entry(entries, actions=None):
+        def fake_select_entry(entries, actions=None, back_action=None):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 # Project picker — pick first.
@@ -2388,6 +2388,36 @@ class TestLocalSessionCLI:
         assert result.exit_code == 0, result.output
         assert captured["entry"].get("_recently_updated") is True
 
+    def test_back_action_returns_to_project_picker(self, tmp_path, monkeypatch):
+        """Esc/Bksp on the session picker routes back to the project
+        picker (outer loop) instead of quitting cct."""
+        from click.testing import CliRunner
+        from claude_code_transcripts import cli
+        import claude_code_transcripts as ct
+
+        _set_up_fake_home_with_session(tmp_path, monkeypatch)
+
+        call_count = {"n": 0}
+
+        def fake_select_entry(entries, actions=None, back_action=None):
+            call_count["n"] += 1
+            # 1: project picker → open first; 2: session picker → back;
+            # 3: project picker re-entered → cancel (quit).
+            if call_count["n"] == 1:
+                assert back_action is None, "project picker shouldn't allow back"
+                return entries[0], "open"
+            if call_count["n"] == 2:
+                assert back_action == "back", "session picker should allow back"
+                return (None, "back")
+            return None
+
+        monkeypatch.setattr(ct, "select_entry", fake_select_entry)
+
+        result = CliRunner().invoke(cli, ["local"])
+        assert result.exit_code == 0
+        assert call_count["n"] == 3, call_count
+        assert "No project selected" in result.output
+
     def test_move_action_saves_cwd_override(self, tmp_path, monkeypatch):
         """Pressing m, entering a valid path, saves the cwd override and
         marks the row as recently updated."""
@@ -2401,7 +2431,7 @@ class TestLocalSessionCLI:
 
         call_count = {"n": 0}
 
-        def fake_select_entry(entries, actions=None):
+        def fake_select_entry(entries, actions=None, back_action=None):
             call_count["n"] += 1
             if call_count["n"] == 1:
                 return entries[0], "open"  # project picker
@@ -2459,7 +2489,7 @@ class TestLocalSessionCLI:
 
         call_log = []
 
-        def fake_select_entry(entries, actions=None):
+        def fake_select_entry(entries, actions=None, back_action=None):
             call_log.append({"actions": actions, "n_entries": len(entries)})
             return entries[0], list(actions.keys())[0] if actions else "select"
 
