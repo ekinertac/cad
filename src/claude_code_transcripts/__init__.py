@@ -566,7 +566,7 @@ def prompt_for_title(default=""):
     return text.strip()
 
 
-def _read_session_excerpt_for_summary(session, max_chars=12000):
+def _read_session_excerpt_for_summary(session, max_chars=2000):
     """Pull a reasonable excerpt from a session for the summarize prompt.
 
     For JSONL providers, walk the first ~max_chars of textual content
@@ -652,7 +652,10 @@ def summarize_session(session):
 
     try:
         result = subprocess.run(
-            ["codex", "exec", prompt],
+            # --ephemeral keeps the throwaway summarization call from
+            # leaving a session file under ~/.codex/sessions, which would
+            # otherwise pollute cct's own session list.
+            ["codex", "exec", "--ephemeral", prompt],
             capture_output=True,
             text=True,
             timeout=60,
