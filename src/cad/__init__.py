@@ -1000,6 +1000,33 @@ def _global_session_cwds():
     return {home, str(Path(home) / "Code")}
 
 
+def _is_claude_queue_operation_session(filepath, scan_lines=50):
+    """Return True if the JSONL contains a ``queue-operation`` event in
+    its first ``scan_lines`` lines. Those are programmatic ``claude -p``
+    invocations (typically from SessionEnd / UserPromptSubmit hooks
+    writing digests, auto-titles, etc.). Claude's own ``--resume`` picker
+    hides them, so cad does too — they're never interactively resumable
+    and would otherwise show up as confusing "phantom" sessions.
+
+    Bounded scan because some interactive sessions are huge (multi-MB);
+    queue-operation events appear near the start of programmatic files.
+    """
+    try:
+        with open(filepath, "r", encoding="utf-8") as fh:
+            for i, line in enumerate(fh):
+                if i >= scan_lines:
+                    return False
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(d, dict) and d.get("type") == "queue-operation":
+                    return True
+    except OSError:
+        pass
+    return False
+
+
 def find_claude_sessions(projects_folder):
     """Return a flat list of claude session dicts under ``projects_folder``.
 
@@ -1016,9 +1043,15 @@ def find_claude_sessions(projects_folder):
             "display":    None,              # lazy — generated from summary
         }
 
-    Sessions without a recoverable ``cwd`` (warmups, broken files,
-    agent-* invocations) are skipped: the picker can't merge them into a
-    project meaningfully without a directory.
+    Filters out:
+
+    - Sessions without a recoverable ``cwd`` (warmups, broken files,
+      agent-* invocations) — can't be grouped into a project.
+    - Sessions containing ``queue-operation`` events. Those are
+      programmatic ``claude -p`` invocations (typically from user hooks
+      doing post-session digests, auto-titles, etc.) and aren't
+      interactively resumable — claude's own ``--resume`` hides them,
+      so cad matches that behaviour to avoid phantom rows.
     """
     projects_folder = Path(projects_folder)
     if not projects_folder.exists():
@@ -1030,6 +1063,8 @@ def find_claude_sessions(projects_folder):
             continue
         cwd = get_session_cwd(f)
         if not cwd:
+            continue
+        if _is_claude_queue_operation_session(f):
             continue
         try:
             st = f.stat()

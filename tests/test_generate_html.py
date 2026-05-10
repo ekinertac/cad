@@ -1318,6 +1318,52 @@ def _write_session(folder, name, summary="Session", cwd=None):
     return f
 
 
+class TestQueueOperationFilter:
+    """Programmatic `claude -p` calls (from hooks etc.) produce JSONLs
+    with `queue-operation` events. Claude's own `--resume` picker hides
+    them; cad should too — otherwise the user sees phantom rows they
+    didn't create."""
+
+    def test_queue_operation_session_is_filtered(self, tmp_path, monkeypatch):
+        import cad as ct
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path / "fake-home")
+        projects_dir = tmp_path / ".claude" / "projects" / "-Users-x-Code-foo"
+        projects_dir.mkdir(parents=True)
+        # Programmatic session: contains a queue-operation event.
+        (projects_dir / "qop.jsonl").write_text(
+            '{"type":"summary","summary":"x"}\n'
+            '{"type":"user","cwd":"/Users/x/Code/foo",'
+            '"message":{"content":"hi"}}\n'
+            '{"type":"queue-operation","payload":{}}\n'
+        )
+        # Real interactive session in same folder.
+        (projects_dir / "real.jsonl").write_text(
+            '{"type":"summary","summary":"x"}\n'
+            '{"type":"user","cwd":"/Users/x/Code/foo",'
+            '"message":{"content":"hello"}}\n'
+        )
+
+        sessions = ct.find_claude_sessions(tmp_path / ".claude" / "projects")
+        ids = sorted(s["session_id"] for s in sessions)
+        assert ids == ["real"], f"queue-operation session should be hidden: {ids}"
+
+    def test_queue_operation_check_is_bounded(self, tmp_path):
+        """The scan caps at ~50 lines so an interactive multi-MB session
+        doesn't trigger a full-file read just to confirm it's clean."""
+        import cad as ct
+
+        f = tmp_path / "big.jsonl"
+        # 100 lines of regular events; a queue-operation tucked at the end.
+        # If the scan is bounded, it won't reach the queue-operation and the
+        # session won't be hidden — that's the intended behaviour (interactive
+        # sessions with rare late events stay visible).
+        lines = ['{"type":"user","message":{"content":"x"}}\n'] * 100
+        lines.append('{"type":"queue-operation","payload":{}}\n')
+        f.write_text("".join(lines))
+        assert ct._is_claude_queue_operation_session(f, scan_lines=50) is False
+
+
 class TestFindLocalProjects:
     """Tests for find_local_projects: cwd-based grouping across providers.
 
