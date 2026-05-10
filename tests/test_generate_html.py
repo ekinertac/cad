@@ -28,6 +28,7 @@ from claude_code_transcripts import (
     get_session_summary,
     find_local_sessions,
     find_local_projects,
+    _prune_temp_outputs,
 )
 
 
@@ -1515,6 +1516,47 @@ class TestFindLocalProjects:
 
         results = find_local_projects(projects_dir)
         assert all(r["name"] != "Global Sessions" for r in results)
+
+
+class TestPruneTempOutputs:
+    """Tests for the temp-output prune helper that bounds disk usage in
+    $TMPDIR/claude-code-transcripts/."""
+
+    def test_does_nothing_when_under_threshold(self, tmp_path):
+        for i in range(3):
+            (tmp_path / f"sess-{i}").mkdir()
+        _prune_temp_outputs(tmp_path, keep=5)
+        assert sorted(p.name for p in tmp_path.iterdir()) == [
+            "sess-0",
+            "sess-1",
+            "sess-2",
+        ]
+
+    def test_keeps_newest_n(self, tmp_path):
+        import os
+
+        # Create 5 dirs with staggered mtimes
+        for i in range(5):
+            d = tmp_path / f"sess-{i}"
+            d.mkdir()
+            os.utime(d, (1_000_000 + i * 100, 1_000_000 + i * 100))
+
+        _prune_temp_outputs(tmp_path, keep=2)
+        # Only the two newest survive (sess-3 and sess-4)
+        survivors = sorted(p.name for p in tmp_path.iterdir())
+        assert survivors == ["sess-3", "sess-4"]
+
+    def test_ignores_files(self, tmp_path):
+        """Non-directory entries shouldn't be considered when pruning."""
+        (tmp_path / "stray.txt").write_text("not a session output")
+        for i in range(3):
+            (tmp_path / f"sess-{i}").mkdir()
+        _prune_temp_outputs(tmp_path, keep=10)
+        assert (tmp_path / "stray.txt").exists()
+
+    def test_missing_parent_is_safe(self, tmp_path):
+        # Should not raise even if the parent doesn't exist yet
+        _prune_temp_outputs(tmp_path / "does-not-exist", keep=5)
 
 
 def _make_mock_select(returns, calls=None):

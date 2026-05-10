@@ -186,6 +186,41 @@ def find_local_sessions(folder, limit=10):
     return results[:limit]
 
 
+TEMP_OUTPUT_PARENT = "claude-code-transcripts"
+TEMP_OUTPUT_KEEP = 20
+
+
+def _temp_output_dir(stem):
+    """Return a per-session temp output dir under a single shared parent
+    (``$TMPDIR/claude-code-transcripts/``). Old sibling dirs beyond
+    :data:`TEMP_OUTPUT_KEEP` are pruned so the user's tmp folder doesn't
+    accumulate transcripts indefinitely between system-level temp cleanups.
+    """
+    parent = Path(tempfile.gettempdir()) / TEMP_OUTPUT_PARENT
+    parent.mkdir(parents=True, exist_ok=True)
+    _prune_temp_outputs(parent, keep=TEMP_OUTPUT_KEEP)
+    return parent / stem
+
+
+def _prune_temp_outputs(parent, keep):
+    """Delete all but the ``keep`` most-recently-modified subdirectories of
+    ``parent``. Best-effort: tolerates missing parents and unreadable
+    entries so a cleanup hiccup never blocks the user's render.
+    """
+    try:
+        children = [c for c in parent.iterdir() if c.is_dir()]
+    except (OSError, FileNotFoundError):
+        return
+    if len(children) <= keep:
+        return
+    children.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in children[keep:]:
+        try:
+            shutil.rmtree(old)
+        except OSError:
+            pass
+
+
 def _global_session_folder_names():
     """Raw folder names that should merge into the virtual 'Global Sessions'
     project. Currently the user's home dir and ~/Code — these are catch-all
@@ -1769,7 +1804,7 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
         parent_dir = Path(output) if output else Path(".")
         output = parent_dir / session_file.stem
     elif output is None:
-        output = Path(tempfile.gettempdir()) / f"claude-session-{session_file.stem}"
+        output = _temp_output_dir(f"claude-session-{session_file.stem}")
 
     output = Path(output)
     generate_html(session_file, output, github_repo=repo)
@@ -1897,10 +1932,7 @@ def json_cmd(json_file, output, output_auto, repo, gist, include_json, open_brow
         parent_dir = Path(output) if output else Path(".")
         output = parent_dir / (url_name or json_file_path.stem)
     elif output is None:
-        output = (
-            Path(tempfile.gettempdir())
-            / f"claude-session-{url_name or json_file_path.stem}"
-        )
+        output = _temp_output_dir(f"claude-session-{url_name or json_file_path.stem}")
 
     output = Path(output)
     generate_html(json_file_path, output, github_repo=repo)
@@ -2269,7 +2301,7 @@ def web_cmd(
         parent_dir = Path(output) if output else Path(".")
         output = parent_dir / session_id
     elif output is None:
-        output = Path(tempfile.gettempdir()) / f"claude-session-{session_id}"
+        output = _temp_output_dir(f"claude-session-{session_id}")
 
     output = Path(output)
     click.echo(f"Generating HTML in {output}/...")
