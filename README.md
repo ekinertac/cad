@@ -62,12 +62,15 @@ The generated output includes:
 
 ### Local sessions
 
-`cct` discovers sessions from multiple agent CLIs:
+`cct` discovers sessions from five agent CLIs:
 
 - **Claude Code** — `~/.claude/projects/*/<uuid>.jsonl`
 - **Codex CLI** — `~/.codex/sessions/YYYY/MM/DD/rollout-<ts>-<uuid>.jsonl`
+- **pi** — `~/.pi/agent/sessions/<encoded>/<ts>_<uuid>.jsonl`
+- **opencode** — `~/.local/share/opencode/opencode.db` (SQLite)
+- **forge** — `~/forge/.forge.db` (SQLite)
 
-Sessions are grouped by their recorded working directory (cwd), so claude and codex sessions in the same project share a single project entry. Each row's badge shows the per-provider counts: `(2c+1x)` = 2 claude + 1 codex sessions.
+Sessions are grouped by their recorded working directory (cwd), so sessions from any agent in the same project share one entry. Each row's badge shows per-provider counts: `(6c+5o+1f)` = 6 claude + 5 opencode + 1 forge.
 
 Run with no arguments to launch a two-step picker — first choose a project, then a session within it:
 
@@ -81,8 +84,14 @@ The first picker lists every project folder under `~/.claude/projects`, sorted b
 
 On the session step:
 
-- **Enter** resumes the session — `cd`s into the project's original working directory and execs the right agent CLI for that session: `claude --dangerously-skip-permissions --resume <id>` or `codex resume <id>`. Skip-permissions on claude is intentional: long sessions devolve into rubber-stamping permission prompts.
-- **h** renders the session to HTML (claude only — codex rendering is not yet supported).
+- **Enter** resumes the session — `cd`s into the project's original working directory and execs the right agent CLI for that session:
+  - claude: `claude --dangerously-skip-permissions --resume <id>`
+  - codex: `codex resume <id>`
+  - pi: `pi --session <id>`
+  - opencode: `opencode --session <id>`
+  - forge: `forge --conversation-id <id>`
+  Skip-permissions on claude is intentional: long sessions devolve into rubber-stamping permission prompts.
+- **h** renders the session to HTML (claude only — other providers' schemas need separate renderers).
 - **/** opens search-filter mode (type to filter, `Enter` confirms+resumes, `Esc` exits search).
 - **Esc** cancels.
 

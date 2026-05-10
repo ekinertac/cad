@@ -29,6 +29,9 @@ from claude_code_transcripts import (
     get_session_summary,
     find_local_sessions,
     find_local_projects,
+    find_pi_sessions,
+    find_opencode_sessions,
+    find_forge_sessions,
     _prune_temp_outputs,
     get_session_cwd,
 )
@@ -1372,8 +1375,7 @@ class TestFindLocalProjects:
         assert results[0]["session_count"] == 3
         assert results[0]["cwd"] == "/Users/x/Code/foo"
         assert results[0]["name"] == "foo"
-        assert results[0]["n_claude"] == 3
-        assert results[0]["n_codex"] == 0
+        assert results[0]["provider_counts"] == {"claude": 3}
 
     def test_latest_mtime_is_max_session_mtime(self, tmp_path, monkeypatch):
         import os as _os
@@ -1557,8 +1559,7 @@ class TestFindLocalProjects:
         results = find_local_projects(tmp_path / ".claude" / "projects")
         assert len(results) == 1
         assert results[0]["session_count"] == 2
-        assert results[0]["n_claude"] == 1
-        assert results[0]["n_codex"] == 1
+        assert results[0]["provider_counts"] == {"claude": 1, "codex": 1}
         assert "1c+1x" in results[0]["display"]
 
     def test_no_global_entry_when_no_global_folders(self, tmp_path, monkeypatch):
@@ -1587,6 +1588,163 @@ def _make_session(provider, session_id, cwd, filepath=None):
         "summary": None,
         "display": None,
     }
+
+
+class TestFindPiSessions:
+    """Pi sessions live at ~/.pi/agent/sessions/<encoded>/<ts>_<uuid>.jsonl
+    with a session-meta line at the top."""
+
+    def test_returns_empty_when_root_missing(self, tmp_path):
+        assert find_pi_sessions(tmp_path / "no-such") == []
+
+    def test_discovers_sessions_with_cwd(self, tmp_path):
+        root = tmp_path / "sessions"
+        proj = root / "--Users-x-Code-foo--"
+        proj.mkdir(parents=True)
+        f = proj / "2026-01-01T00-00-00-000Z_abc-123.jsonl"
+        f.write_text('{"type":"session","id":"abc-123","cwd":"/Users/x/Code/foo"}\n')
+        results = find_pi_sessions(root)
+        assert len(results) == 1
+        assert results[0]["provider"] == "pi"
+        assert results[0]["session_id"] == "abc-123"
+        assert results[0]["cwd"] == "/Users/x/Code/foo"
+
+    def test_skips_sessions_missing_id_or_cwd(self, tmp_path):
+        root = tmp_path / "sessions"
+        proj = root / "--x--"
+        proj.mkdir(parents=True)
+        (proj / "no-cwd.jsonl").write_text('{"type":"session","id":"x"}\n')
+        (proj / "no-id.jsonl").write_text('{"type":"session","cwd":"/some/dir"}\n')
+        assert find_pi_sessions(root) == []
+
+
+class TestFindOpencodeSessions:
+    """opencode keeps sessions in a SQLite DB. Discovery reads `directory`
+    (cwd), `title` (summary), and `time_updated`."""
+
+    def _make_db(self, path):
+        import sqlite3
+
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            """
+            CREATE TABLE session(
+                id TEXT, project_id TEXT, parent_id TEXT, slug TEXT,
+                directory TEXT, title TEXT, version TEXT,
+                share_url TEXT,
+                summary_additions INTEGER, summary_deletions INTEGER,
+                summary_files INTEGER, summary_diffs TEXT, revert TEXT,
+                permission TEXT,
+                time_created INTEGER, time_updated INTEGER,
+                time_compacting INTEGER, time_archived INTEGER,
+                workspace_id TEXT, path TEXT, agent TEXT, model TEXT
+            );
+            """
+        )
+        return conn
+
+    def test_returns_empty_when_db_missing(self, tmp_path):
+        assert find_opencode_sessions(tmp_path / "no.db") == []
+
+    def test_discovers_session_with_directory_and_title(self, tmp_path):
+        db = tmp_path / "opencode.db"
+        conn = self._make_db(db)
+        conn.execute(
+            "INSERT INTO session(id, slug, directory, title, version, "
+            "time_created, time_updated) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "ses_abc",
+                "slug",
+                "/Users/x/Code/foo",
+                "Some session title",
+                "0.1",
+                1700000000,
+                1700000100,
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        results = find_opencode_sessions(db)
+        assert len(results) == 1
+        assert results[0]["provider"] == "opencode"
+        assert results[0]["session_id"] == "ses_abc"
+        assert results[0]["cwd"] == "/Users/x/Code/foo"
+        assert results[0]["summary"] == "Some session title"
+        # Stored value is epoch ms, converted to seconds for our model
+        assert results[0]["mtime"] == 1700000.1
+
+
+class TestFindForgeSessions:
+    """Forge keeps conversations in SQLite. cwd is embedded in the context
+    blob inside <current_working_directory> tags — extracted via regex."""
+
+    def _make_db(self, path):
+        import sqlite3
+
+        conn = sqlite3.connect(path)
+        conn.executescript(
+            """
+            CREATE TABLE conversations(
+                conversation_id TEXT PRIMARY KEY,
+                title TEXT,
+                workspace_id BIGINT,
+                context TEXT,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP,
+                metrics TEXT
+            );
+            """
+        )
+        return conn
+
+    def test_returns_empty_when_db_missing(self, tmp_path):
+        assert find_forge_sessions(tmp_path / "no.db") == []
+
+    def test_discovers_conversation_and_extracts_cwd(self, tmp_path):
+        db = tmp_path / "forge.db"
+        conn = self._make_db(db)
+        ctx = (
+            "Here is the system prompt with embedded "
+            "<current_working_directory>/Users/x/Code/foo</current_working_directory>"
+            " more text follows."
+        )
+        conn.execute(
+            "INSERT INTO conversations VALUES (?, ?, 0, ?, ?, ?, NULL)",
+            (
+                "conv-123",
+                "Conversation title",
+                ctx,
+                "2026-01-01 10:00:00",
+                "2026-05-10 14:00:00",
+            ),
+        )
+        conn.commit()
+        conn.close()
+
+        results = find_forge_sessions(db)
+        assert len(results) == 1
+        assert results[0]["provider"] == "forge"
+        assert results[0]["session_id"] == "conv-123"
+        assert results[0]["cwd"] == "/Users/x/Code/foo"
+        assert results[0]["summary"] == "Conversation title"
+
+    def test_skips_conversation_without_cwd_tag(self, tmp_path):
+        db = tmp_path / "forge.db"
+        conn = self._make_db(db)
+        conn.execute(
+            "INSERT INTO conversations VALUES (?, ?, 0, ?, ?, ?, NULL)",
+            (
+                "conv-no-cwd",
+                "x",
+                "system prompt without the magic tag",
+                "2026-01-01 10:00:00",
+                "2026-01-01 10:00:00",
+            ),
+        )
+        conn.commit()
+        conn.close()
+        assert find_forge_sessions(db) == []
 
 
 class TestResumeWritesCwdFile:

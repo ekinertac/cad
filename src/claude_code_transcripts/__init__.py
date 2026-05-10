@@ -395,6 +395,9 @@ PROVIDER_RESUME_COMMANDS = {
     # intentional — long sessions devolve into rubber-stamping prompts.
     "claude": ["claude", "--dangerously-skip-permissions", "--resume"],
     "codex": ["codex", "resume"],
+    "pi": ["pi", "--session"],
+    "opencode": ["opencode", "--session"],
+    "forge": ["forge", "--conversation-id"],
 }
 
 
@@ -640,21 +643,226 @@ def get_codex_summary(filepath, max_length=200):
     return "(no prompt)"
 
 
+def find_pi_sessions(root=None):
+    """pi sessions live at ``~/.pi/agent/sessions/<encoded-cwd>/<ts>_<uuid>.jsonl``.
+    Line 1 is a ``session`` event with ``id`` and ``cwd`` directly — same
+    cheap-readline pattern as codex.
+    """
+    if root is None:
+        root = Path.home() / ".pi" / "agent" / "sessions"
+    root = Path(root)
+    if not root.exists():
+        return []
+
+    out = []
+    for f in root.glob("*/*.jsonl"):
+        try:
+            with open(f, "r", encoding="utf-8") as fh:
+                meta = json.loads(fh.readline())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(meta, dict):
+            continue
+        sid = meta.get("id")
+        cwd = meta.get("cwd")
+        if not sid or not cwd:
+            continue
+        try:
+            st = f.stat()
+        except OSError:
+            continue
+        out.append(
+            {
+                "provider": "pi",
+                "session_id": sid,
+                "filepath": f,
+                "cwd": cwd,
+                "mtime": st.st_mtime,
+                "size": st.st_size,
+                "summary": None,
+                "display": None,
+            }
+        )
+    return out
+
+
+def get_pi_summary(filepath, max_length=200):
+    """First user prompt in a pi JSONL. Pi wraps messages as
+    ``{"type":"message","message":{"role":"user","content":[{...}]}}`` with
+    content as a list of typed blocks (``{"type":"text","text":"..."}``).
+    """
+    try:
+        with open(filepath, "r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    d = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(d, dict):
+                    continue
+                if d.get("type") != "message":
+                    continue
+                msg = d.get("message")
+                if not isinstance(msg, dict) or msg.get("role") != "user":
+                    continue
+                content = msg.get("content")
+                if isinstance(content, list):
+                    text = " ".join(
+                        b.get("text", "")
+                        for b in content
+                        if isinstance(b, dict) and b.get("type") == "text"
+                    )
+                elif isinstance(content, str):
+                    text = content
+                else:
+                    text = ""
+                text = text.strip()
+                if not text:
+                    continue
+                first_line = text.split("\n", 1)[0]
+                if len(first_line) > max_length:
+                    first_line = first_line[: max_length - 3] + "..."
+                return first_line
+    except OSError:
+        pass
+    return "(no prompt)"
+
+
+def find_opencode_sessions(db_path=None):
+    """opencode stores sessions in a SQLite DB at
+    ``~/.local/share/opencode/opencode.db``. The ``session`` table already
+    has ``directory`` (cwd), ``title`` (a usable summary), and
+    ``time_updated`` (epoch seconds), so no JSONL parsing needed.
+    """
+    if db_path is None:
+        db_path = Path.home() / ".local" / "share" / "opencode" / "opencode.db"
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return []
+
+    out = []
+    try:
+        # Read-only mode so we don't fight with a running opencode process.
+        import sqlite3
+
+        uri = f"file:{db_path}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            for row in conn.execute(
+                "SELECT id, title, directory, time_updated FROM session"
+            ):
+                sid, title, directory, time_updated = row
+                if not sid or not directory:
+                    continue
+                out.append(
+                    {
+                        "provider": "opencode",
+                        "session_id": sid,
+                        # The DB row IS the source of truth — no on-disk
+                        # filepath to point at. Use the DB path as a
+                        # placeholder so size/dependent code doesn't crash.
+                        "filepath": db_path,
+                        "cwd": directory,
+                        # opencode stores time as epoch milliseconds.
+                        "mtime": float(time_updated or 0) / 1000.0,
+                        "size": 0,
+                        # opencode already records a title; carry it through
+                        # so load_session_summary doesn't need to re-read.
+                        "summary": title or "(no title)",
+                        "display": None,
+                    }
+                )
+    except Exception:
+        # Any DB error → just return what we have, don't crash discovery.
+        pass
+    return out
+
+
+# Forge embeds the cwd inside its conversation context blob (system prompt
+# tagged section). This regex is the cheapest reliable way to extract it
+# without parsing the entire JSON tree.
+_FORGE_CWD_RE = re.compile(
+    r"<current_working_directory>([^<]+)</current_working_directory>"
+)
+
+
+def find_forge_sessions(db_path=None):
+    """forge stores conversations in a SQLite DB at ``~/forge/.forge.db``.
+    The ``conversations`` table has ``conversation_id``, ``title``,
+    ``updated_at``, and a ``context`` JSON blob. cwd lives inside the blob
+    as ``<current_working_directory>`` tags — a regex extraction is cheaper
+    than parsing the full tree (which can be hundreds of KB).
+    """
+    if db_path is None:
+        db_path = Path.home() / "forge" / ".forge.db"
+    db_path = Path(db_path)
+    if not db_path.exists():
+        return []
+
+    out = []
+    try:
+        import sqlite3
+
+        uri = f"file:{db_path}?mode=ro"
+        with sqlite3.connect(uri, uri=True) as conn:
+            for row in conn.execute(
+                "SELECT conversation_id, title, context, updated_at "
+                "FROM conversations"
+            ):
+                cid, title, context, updated_at = row
+                if not cid or not context:
+                    continue
+                m = _FORGE_CWD_RE.search(context)
+                if not m:
+                    # Conversation without a recoverable cwd — skip; we
+                    # can't group or chdir for it.
+                    continue
+                cwd = m.group(1).strip()
+                # updated_at is a TIMESTAMP string like "2026-05-10 21:00:00".
+                # Best-effort parse, fallback to 0 (will sort to bottom).
+                try:
+                    mtime = datetime.fromisoformat(
+                        (updated_at or "").replace("Z", "+00:00")
+                    ).timestamp()
+                except (ValueError, AttributeError, TypeError):
+                    mtime = 0.0
+                out.append(
+                    {
+                        "provider": "forge",
+                        "session_id": cid,
+                        "filepath": db_path,
+                        "cwd": cwd,
+                        "mtime": mtime,
+                        "size": 0,
+                        "summary": title or "(no title)",
+                        "display": None,
+                    }
+                )
+    except Exception:
+        pass
+    return out
+
+
 def load_session_summary(session):
     """Populate ``session['summary']`` and ``session['display']`` in place.
 
-    Summaries are loaded lazily so the project picker (which only needs cwd
-    + mtime + size) stays cheap. Once the user picks a project we hydrate
-    every session in it just before showing the session picker.
+    For JSONL-based providers (claude, codex, pi) the summary is loaded
+    lazily here — discovery only reads cwd + mtime, leaving the heavier
+    first-prompt scan for once the user actually chose a project.
+    SQLite-based providers (opencode, forge) already set the summary at
+    discovery time because their schema makes it cheap; for those we just
+    skip the scan and go straight to display building.
     """
-    if session["summary"] is not None:
+    if session["display"] is not None:
         return
-    if session["provider"] == "claude":
-        session["summary"] = get_session_summary(session["filepath"])
-    elif session["provider"] == "codex":
-        session["summary"] = get_codex_summary(session["filepath"])
-    else:
-        session["summary"] = "(unknown provider)"
+    if session["summary"] is None:
+        if session["provider"] == "claude":
+            session["summary"] = get_session_summary(session["filepath"])
+        elif session["provider"] == "codex":
+            session["summary"] = get_codex_summary(session["filepath"])
+        elif session["provider"] == "pi":
+            session["summary"] = get_pi_summary(session["filepath"])
+        else:
+            session["summary"] = "(unknown provider)"
 
     mtime = datetime.fromtimestamp(session["mtime"])
     date_str = mtime.strftime("%Y-%m-%d %H:%M")
@@ -669,19 +877,29 @@ def load_session_summary(session):
     )
 
 
+# Single-letter badge codes for the project-row provider counts. Adding a
+# new provider here is the only place the badge layer cares about names.
+PROVIDER_BADGES = {
+    "claude": "c",
+    "codex": "x",
+    "pi": "p",
+    "opencode": "o",
+    "forge": "f",
+}
+
+
 def find_local_projects(folder=None):
     """Discover all sessions across providers and group them by ``cwd`` into
     project dicts for the two-step picker.
 
-    The grouping key is the JSONL's recorded ``cwd`` rather than the
-    encoded folder name, so claude and codex sessions in the same directory
+    Grouping key is the JSONL's / DB's recorded ``cwd`` rather than the
+    encoded folder name, so sessions from any agent in the same directory
     end up in a single project entry. Sessions whose cwd matches the
     'Global Sessions' rule (home or ~/Code) collapse into a single virtual
     entry.
 
     The ``folder`` argument is accepted for backward compatibility but is
-    typically unused — claude sessions come from ``~/.claude/projects`` and
-    codex sessions from ``~/.codex/sessions`` regardless.
+    typically unused — providers know their own canonical roots.
 
     Each project dict::
 
@@ -691,14 +909,19 @@ def find_local_projects(folder=None):
             "sessions":      [<session dict>, ...],      # sorted newest-first
             "session_count": 3,
             "latest_mtime":  1700000000.0,
-            "n_claude":      2,                          # for the badge
-            "n_codex":       1,
+            "provider_counts": {"claude": 2, "codex": 1},
             "display":       "foo            2026-05-10 14:02   3 sessions  (2c+1x)",
         }
     """
     if folder is None:
         folder = Path.home() / ".claude" / "projects"
-    sessions = find_claude_sessions(folder) + find_codex_sessions()
+    sessions = (
+        find_claude_sessions(folder)
+        + find_codex_sessions()
+        + find_pi_sessions()
+        + find_opencode_sessions()
+        + find_forge_sessions()
+    )
     return _group_sessions_into_projects(sessions)
 
 
@@ -717,38 +940,25 @@ def _group_sessions_into_projects(sessions):
         else:
             by_cwd[s["cwd"]].append(s)
 
-    projects = []
-    for cwd, sess in by_cwd.items():
+    def _build(name, cwd, sess):
         sess.sort(key=lambda x: x["mtime"], reverse=True)
-        n_claude = sum(1 for s in sess if s["provider"] == "claude")
-        n_codex = sum(1 for s in sess if s["provider"] == "codex")
-        projects.append(
-            {
-                "name": Path(cwd).name or cwd,
-                "cwd": cwd,
-                "sessions": sess,
-                "session_count": len(sess),
-                "latest_mtime": sess[0]["mtime"],
-                "n_claude": n_claude,
-                "n_codex": n_codex,
-            }
-        )
+        counts = defaultdict(int)
+        for s in sess:
+            counts[s["provider"]] += 1
+        return {
+            "name": name,
+            "cwd": cwd,
+            "sessions": sess,
+            "session_count": len(sess),
+            "latest_mtime": sess[0]["mtime"],
+            "provider_counts": dict(counts),
+        }
 
+    projects = [
+        _build(Path(cwd).name or cwd, cwd, sess) for cwd, sess in by_cwd.items()
+    ]
     if global_sessions:
-        global_sessions.sort(key=lambda x: x["mtime"], reverse=True)
-        n_claude = sum(1 for s in global_sessions if s["provider"] == "claude")
-        n_codex = sum(1 for s in global_sessions if s["provider"] == "codex")
-        projects.append(
-            {
-                "name": "Global Sessions",
-                "cwd": None,
-                "sessions": global_sessions,
-                "session_count": len(global_sessions),
-                "latest_mtime": global_sessions[0]["mtime"],
-                "n_claude": n_claude,
-                "n_codex": n_codex,
-            }
-        )
+        projects.append(_build("Global Sessions", None, global_sessions))
 
     projects.sort(key=lambda p: p["latest_mtime"], reverse=True)
 
@@ -761,11 +971,13 @@ def _group_sessions_into_projects(sessions):
     for p in projects:
         date_str = datetime.fromtimestamp(p["latest_mtime"]).strftime("%Y-%m-%d %H:%M")
         plural = "session" if p["session_count"] == 1 else "sessions"
+        # Badges in PROVIDER_BADGES order so output is stable regardless of
+        # which providers happen to have sessions in this project.
         badges = []
-        if p["n_claude"]:
-            badges.append(f"{p['n_claude']}c")
-        if p["n_codex"]:
-            badges.append(f"{p['n_codex']}x")
+        for provider, code in PROVIDER_BADGES.items():
+            n = p["provider_counts"].get(provider, 0)
+            if n:
+                badges.append(f"{n}{code}")
         badge_str = "+".join(badges) if badges else ""
         line = (
             f"{p['name']:<28} {date_str}   {p['session_count']} {plural}"
