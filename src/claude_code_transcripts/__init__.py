@@ -571,25 +571,33 @@ def prompt_for_cwd(default=""):
     validates the path exists and is a directory. Returns the absolute
     path string, or the sentinel ``""`` to mean "remove existing
     override", or ``None`` if cancelled.
+
+    On invalid input we keep the user in the prompt instead of bouncing
+    back to the picker — otherwise the error line ends up buried just
+    above a freshly-rendered session list.
     """
     from prompt_toolkit import prompt as _ptk_prompt
     from prompt_toolkit.formatted_text import FormattedText
 
-    try:
-        text = _ptk_prompt(
-            FormattedText([("class:prompt", "New cwd (empty to clear): ")]),
-            default=default,
-        )
-    except (KeyboardInterrupt, EOFError):
-        return None
-    text = text.strip()
-    if not text:
-        return ""
-    path = Path(text).expanduser().resolve()
-    if not path.is_dir():
+    current = default
+    while True:
+        try:
+            text = _ptk_prompt(
+                FormattedText([("class:prompt", "New cwd (empty to clear): ")]),
+                default=current,
+            )
+        except (KeyboardInterrupt, EOFError):
+            return None
+        text = text.strip()
+        if not text:
+            return ""
+        path = Path(text).expanduser().resolve()
+        if path.is_dir():
+            return str(path)
         click.echo(f"Not a directory: {path}", err=True)
-        return None
-    return str(path)
+        # Pre-fill the next prompt with what they typed so they can edit
+        # the path (fix a typo) instead of retyping it.
+        current = text
 
 
 def _read_session_excerpt_for_summary(session, max_chars=2000):
