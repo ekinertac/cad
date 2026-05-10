@@ -338,8 +338,18 @@ def select_entry(entries, actions=None):
             pos = indices.index(src_i)
             sel = pos == state["selected"]
             arrow = "» " if sel else "  "
-            style = "class:selected" if sel else ""
-            out.append((style, f"{arrow}{entries[src_i]['display']}\n"))
+            entry = entries[src_i]
+            # Green-highlight rows touched (rename / summarize) in this cct
+            # run so the user can see at a glance what just changed. The
+            # cursor row uses the reverse style instead — `recent` reads
+            # naturally from the rest of the list.
+            if sel:
+                style = "class:selected"
+            elif entry.get("_recently_updated"):
+                style = "class:updated"
+            else:
+                style = ""
+            out.append((style, f"{arrow}{entry['display']}\n"))
         if below > 0:
             out.append(("class:hint", f"  ▼ {below} more below\n"))
         return out
@@ -355,7 +365,7 @@ def select_entry(entries, actions=None):
         # Render the hint line from the actions dict so it always reflects
         # the configured keys for this picker.
         parts = [f"{'Enter' if k == 'enter' else k}={v}" for k, v in actions.items()]
-        parts += ["/=search", "Esc=cancel"]
+        parts += ["/=search", "q/Esc=quit"]
         return [("class:status", " " + " · ".join(parts) + "\n")]
 
     kb = KeyBindings()
@@ -419,6 +429,13 @@ def select_entry(entries, actions=None):
         else:
             event.app.exit()
 
+    # `q` is a second way to cancel — handy when Esc feels far away. Only
+    # outside search mode so the user can still type `q` as part of a
+    # filter query.
+    @kb.add("q", filter=not_searching)
+    def _(event):
+        event.app.exit()
+
     @kb.add("c-c", eager=True)
     def _(event):
         event.app.exit()
@@ -455,6 +472,9 @@ def select_entry(entries, actions=None):
             "selected": "reverse",
             "hint": "fg:ansibrightblack",
             "status": "fg:ansicyan",
+            # Bright-green for rows just renamed/summarized — non-persistent,
+            # only highlights what changed since cct launched.
+            "updated": "fg:ansibrightgreen bold",
         }
     )
     Application(layout=layout, key_bindings=kb, style=style, full_screen=False).run()
@@ -2743,6 +2763,7 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
             save_title_override(session["provider"], session["session_id"], new_title)
             session["summary"] = new_title or None
             session["display"] = None
+            session["_recently_updated"] = True
             load_session_summary(session)
             continue
 
@@ -2756,6 +2777,7 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
             save_title_override(session["provider"], session["session_id"], title)
             session["summary"] = title
             session["display"] = None
+            session["_recently_updated"] = True
             load_session_summary(session)
             click.echo(f"Saved title: {title}")
             continue

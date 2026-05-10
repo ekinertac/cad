@@ -2305,6 +2305,37 @@ class TestLocalSessionCLI:
         sess = {"provider": "claude", "session_id": "abc-123"}
         assert ct.get_title_override(sess) == "My session"
 
+    def test_rename_flags_session_as_recently_updated(self, tmp_path, monkeypatch):
+        """After rename, the session dict carries _recently_updated=True so
+        the picker can green-highlight it on the next render."""
+        from click.testing import CliRunner
+        from claude_code_transcripts import cli
+        import claude_code_transcripts as ct
+
+        _set_up_fake_home_with_session(tmp_path, monkeypatch)
+
+        call_count = {"n": 0}
+        captured = {}
+
+        def fake_select_entry(entries, actions=None):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                # Project picker — pick first.
+                return entries[0], "open"
+            if call_count["n"] == 2:
+                # Session picker, first round — trigger rename.
+                return entries[0], "rename"
+            # Session picker, second round — capture flag and cancel.
+            captured["entry"] = entries[0]
+            return None
+
+        monkeypatch.setattr(ct, "select_entry", fake_select_entry)
+        monkeypatch.setattr(ct, "prompt_for_title", lambda default="": "Fresh title")
+
+        result = CliRunner().invoke(cli, ["local"])
+        assert result.exit_code == 0, result.output
+        assert captured["entry"].get("_recently_updated") is True
+
     def test_summarize_action_calls_llm_and_loops(self, tmp_path, monkeypatch):
         """Pressing s runs summarize_session, saves its return as the
         sidecar title, and loops back to the picker."""
