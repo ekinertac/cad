@@ -606,6 +606,28 @@ def prompt_for_title(default=""):
     return text.strip()
 
 
+def prompt_confirm(message, default=False):
+    """Yes/No prompt used as a guardrail before destructive bulk
+    operations. Returns ``True`` only when the user types y/yes.
+    Default is ``False`` (the safe answer) — pressing Enter on an
+    unread prompt won't accidentally fire the action.
+    """
+    from prompt_toolkit import prompt as _ptk_prompt
+    from prompt_toolkit.formatted_text import FormattedText
+
+    suffix = " [y/N] " if not default else " [Y/n] "
+    try:
+        text = _ptk_prompt(
+            FormattedText([("class:prompt", message + suffix)]),
+        )
+    except (KeyboardInterrupt, EOFError):
+        return False
+    text = text.strip().lower()
+    if not text:
+        return default
+    return text in ("y", "yes")
+
+
 def prompt_for_cwd(default=""):
     """Prompt for a session's new project directory. Resolves ``~``,
     validates the path exists and is a directory. Returns the absolute
@@ -1337,18 +1359,42 @@ def _load_titles():
         return {}
 
 
+def _atomic_write_json(path, data):
+    """Write ``data`` to ``path`` as JSON without risking a half-written
+    file. Steps:
+
+    1. Copy the existing file (if any) to ``<path>.bak`` — one-step undo
+       if the user later realises they made a mistake.
+    2. Write to ``<path>.tmp`` next to the target.
+    3. ``os.replace`` the temp file onto the target — POSIX atomic; the
+       file is either fully old or fully new, never partial.
+
+    If a crash happens between (1) and (3), the user still has a valid
+    ``<path>`` (the previous version) plus a ``.bak`` of the same.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.exists():
+        try:
+            shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
+        except OSError:
+            # Best effort — don't block a save because backup failed.
+            pass
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 def save_title_override(provider, session_id, title):
     """Write a user-provided title for one session to the sidecar. Empty
     or falsy ``title`` removes the override."""
-    f = _titles_file()
     titles = _load_titles()
     key = f"{provider}:{session_id}"
     if title:
         titles[key] = title
     else:
         titles.pop(key, None)
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(titles, indent=2, ensure_ascii=False), encoding="utf-8")
+    _atomic_write_json(_titles_file(), titles)
 
 
 def get_title_override(session):
@@ -1376,20 +1422,18 @@ def _load_cwd_overrides():
 
 
 def save_cwd_override(provider, session_id, cwd):
-    """Move a session into a different cct project. Empty/falsy ``cwd``
+    """Move a session into a different cad project. Empty/falsy ``cwd``
     removes the override (i.e. the session goes back to wherever its
     agent file recorded it). Path is normalised before storing so we can
     rely on string equality for the Global Sessions match later.
     """
-    f = _cwd_overrides_file()
     overrides = _load_cwd_overrides()
     key = f"{provider}:{session_id}"
     if cwd:
         overrides[key] = str(Path(cwd).expanduser().resolve())
     else:
         overrides.pop(key, None)
-    f.parent.mkdir(parents=True, exist_ok=True)
-    f.write_text(json.dumps(overrides, indent=2, ensure_ascii=False), encoding="utf-8")
+    _atomic_write_json(_cwd_overrides_file(), overrides)
 
 
 def get_cwd_override(provider, session_id):
@@ -3047,12 +3091,29 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
             if new_cwd is None:  # cancel
                 continue
             project_sessions = selected_project["sessions"]
+            n = len(project_sessions)
+            # Guardrail: the blast radius is N sessions in one keystroke,
+            # and `r` is one key from `Enter`. Always confirm before
+            # firing — covers both real renames and the "empty input
+            # clears overrides" undo path.
+            if new_cwd:
+                msg = (
+                    f"Move {n} session(s) in {selected_project['name']} "
+                    f"to {new_cwd}?"
+                )
+            else:
+                msg = (
+                    f"Clear cwd overrides for {n} session(s) in "
+                    f"{selected_project['name']}?"
+                )
+            if not prompt_confirm(msg):
+                click.echo("Cancelled.")
+                continue
             for s in project_sessions:
                 save_cwd_override(s["provider"], s["session_id"], new_cwd)
             verb = "Moved" if new_cwd else "Cleared override for"
             click.echo(
-                f"{verb} {len(project_sessions)} session(s) "
-                f"in {selected_project['name']} "
+                f"{verb} {n} session(s) in {selected_project['name']} "
                 f"to {new_cwd or '(no override)'}"
             )
             # Re-discover so the picker reflects the new grouping.

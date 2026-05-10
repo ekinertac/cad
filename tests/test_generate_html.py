@@ -1745,6 +1745,41 @@ class TestFindForgeSessions:
         assert find_forge_sessions(db) == []
 
 
+class TestAtomicSidecarWrites:
+    """save_*_override goes through _atomic_write_json: previous file is
+    copied to <path>.bak, new content is staged to <path>.tmp then
+    os.replace'd onto <path>. Crash-safe and gives the user a one-step
+    undo path."""
+
+    def test_creates_bak_on_second_write(self, tmp_path, monkeypatch):
+        """The first write has nothing to back up. The second write copies
+        the existing file to .bak before overwriting."""
+        import cad as ct
+        import json
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+        ct.save_title_override("claude", "abc", "first-title")
+        bak = ct._titles_file().with_suffix(".json.bak")
+        assert not bak.exists(), "no .bak on first write — nothing to back up"
+
+        ct.save_title_override("claude", "abc", "second-title")
+        assert bak.exists(), ".bak should appear before the second write"
+        # The .bak contains the FIRST title, not the second.
+        saved = json.loads(bak.read_text())
+        assert saved == {"claude:abc": "first-title"}
+
+    def test_no_tmp_file_left_behind(self, tmp_path, monkeypatch):
+        """os.replace consumes the temp; no .tmp should be left."""
+        import cad as ct
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        ct.save_title_override("claude", "abc", "x")
+        ct.save_title_override("claude", "abc", "y")
+        tmp = ct._titles_file().with_suffix(".json.tmp")
+        assert not tmp.exists()
+
+
 class TestCwdOverrideSidecar:
     """Cwd overrides live at ~/.cad/cwd-overrides.json. Discovery swaps
     them in before grouping, so a moved session lands in the new project.
@@ -2548,12 +2583,59 @@ class TestLocalSessionCLI:
 
         monkeypatch.setattr(ct, "select_entry", fake_select_entry)
         monkeypatch.setattr(ct, "prompt_for_cwd", lambda default="": str(new_cwd))
+        # Always say "yes" to the confirmation guardrail in tests.
+        monkeypatch.setattr(ct, "prompt_confirm", lambda message, default=False: True)
 
         result = CliRunner().invoke(cli, ["local"])
         assert result.exit_code == 0, result.output
 
         for sid in session_ids:
             assert ct.get_cwd_override("claude", sid) == str(new_cwd.resolve())
+
+    def test_project_rename_aborts_when_user_declines_confirmation(
+        self, tmp_path, monkeypatch
+    ):
+        """If the user types N at the confirmation prompt, no overrides
+        get saved even though prompt_for_cwd returned a valid path."""
+        from click.testing import CliRunner
+        from cad import cli
+        import cad as ct
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        proj_dir = fake_home / ".claude" / "projects" / "test-project"
+        proj_dir.mkdir(parents=True)
+        (proj_dir / "abc-123.jsonl").write_text(
+            '{"type":"summary","summary":"x"}\n'
+            '{"type":"user","cwd":"/Users/x/Code/foo",'
+            '"message":{"content":"hi"}}\n'
+        )
+
+        new_cwd = tmp_path / "new"
+        new_cwd.mkdir()
+
+        call_count = {"n": 0}
+
+        def fake_select_entry(
+            entries, actions=None, back_action=None, initial_selected=0
+        ):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return entries[0], "rename"
+            return None
+
+        monkeypatch.setattr(ct, "select_entry", fake_select_entry)
+        monkeypatch.setattr(ct, "prompt_for_cwd", lambda default="": str(new_cwd))
+        # User says NO to the confirmation.
+        monkeypatch.setattr(ct, "prompt_confirm", lambda message, default=False: False)
+
+        result = CliRunner().invoke(cli, ["local"])
+        assert result.exit_code == 0, result.output
+        assert "Cancelled" in result.output
+        # No override saved.
+        assert ct.get_cwd_override("claude", "abc-123") is None
 
     def test_move_action_saves_cwd_override(self, tmp_path, monkeypatch):
         """Pressing m, entering a valid path, saves the cwd override and
