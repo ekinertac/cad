@@ -518,6 +518,133 @@ def resume_session(session):
 # `command cct` in the wrapper skips this function so the binary runs once.
 # zsh and bash get separate snippets only because the conditional syntax
 # differs slightly; the mechanism is identical.
+def prompt_for_title(default=""):
+    """Prompt the user for a new session title. Uses prompt_toolkit so the
+    experience matches the picker. Returns the entered string (possibly
+    empty — caller decides what to do with that). Returns ``None`` if
+    cancelled (Ctrl-C / EOF).
+    """
+    from prompt_toolkit import prompt as _ptk_prompt
+    from prompt_toolkit.formatted_text import FormattedText
+
+    try:
+        text = _ptk_prompt(
+            FormattedText([("class:prompt", "Title: ")]),
+            default=default,
+        )
+    except (KeyboardInterrupt, EOFError):
+        return None
+    return text.strip()
+
+
+def _read_session_excerpt_for_summary(session, max_chars=12000):
+    """Pull a reasonable excerpt from a session for the summarize prompt.
+
+    For JSONL providers, walk the first ~max_chars of textual content
+    (user prompts + assistant replies). For SQLite providers (opencode,
+    forge), we already store a title at discovery time so summarize is
+    mostly redundant — but we still fall back to whatever summary we have
+    so the LLM has something to reword. Returns a single string.
+    """
+    provider = session["provider"]
+    parts = []
+    if provider in ("claude", "codex", "pi"):
+        try:
+            with open(session["filepath"], "r", encoding="utf-8") as fh:
+                for line in fh:
+                    try:
+                        d = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    text = _extract_summarizable_text(d)
+                    if text:
+                        parts.append(text)
+                        if sum(len(p) for p in parts) >= max_chars:
+                            break
+        except OSError:
+            pass
+    if not parts and session.get("summary"):
+        parts.append(session["summary"])
+    excerpt = "\n\n".join(parts)
+    return excerpt[:max_chars]
+
+
+def _extract_summarizable_text(event):
+    """Best-effort text extractor for one JSONL event across providers.
+    Returns a string or '' if nothing useful."""
+    if not isinstance(event, dict):
+        return ""
+    # Claude shape: {"type":"user|assistant", "message":{"content": ...}}
+    msg = event.get("message")
+    if isinstance(msg, dict):
+        content = msg.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            chunks = []
+            for b in content:
+                if isinstance(b, dict) and b.get("type") == "text":
+                    chunks.append(b.get("text", ""))
+                elif isinstance(b, str):
+                    chunks.append(b)
+            return " ".join(chunks).strip()
+    # Codex shape: event_msg with payload.message
+    payload = event.get("payload")
+    if isinstance(payload, dict):
+        if payload.get("type") in ("user_message", "agent_message"):
+            return (payload.get("message") or "").strip()
+    return ""
+
+
+def summarize_session(session):
+    """Call the Anthropic API to generate a short title for the session.
+
+    Lazy-imports ``anthropic`` so the dependency only matters if you press
+    ``s``. Returns the new title string, or raises ``click.ClickException``
+    with a helpful message if the SDK isn't installed or the API call
+    fails. Uses Haiku — fast, cheap, plenty for a 3-6 word title.
+    """
+    try:
+        import anthropic
+    except ImportError:
+        raise click.ClickException(
+            "Summarize needs the anthropic SDK: `uv pip install anthropic`."
+        )
+
+    excerpt = _read_session_excerpt_for_summary(session)
+    if not excerpt:
+        raise click.ClickException("Could not read session content to summarize.")
+
+    try:
+        client = anthropic.Anthropic()
+        resp = client.messages.create(
+            model="claude-haiku-4-5",
+            max_tokens=60,
+            messages=[
+                {
+                    "role": "user",
+                    "content": (
+                        "Generate a concise 3-7 word title that captures what "
+                        "this coding session was about. Respond with the title "
+                        "only — no quotes, no trailing punctuation.\n\n"
+                        f"<session>\n{excerpt}\n</session>"
+                    ),
+                }
+            ],
+        )
+    except anthropic.AnthropicError as e:  # broad, but the SDK's base error
+        raise click.ClickException(f"Anthropic API error: {e}")
+
+    title = "".join(
+        b.text for b in resp.content if getattr(b, "type", None) == "text"
+    ).strip()
+    # Strip wrapping quotes the model sometimes adds despite the instruction.
+    title = title.strip("\"'").strip()
+    if not title:
+        raise click.ClickException("Anthropic returned an empty title.")
+    return title
+
+
 SHELL_WRAPPERS = {
     "zsh": """\
 cct() {
@@ -928,6 +1055,43 @@ def find_forge_sessions(db_path=None):
     return out
 
 
+def _titles_file():
+    """Sidecar storage for cct's title overrides — set via the picker's `r`
+    (rename) or `s` (summarize) actions. Keyed by ``<provider>:<session_id>``
+    so it's uniform across all agents and never touches the agent's own
+    storage. JSON for trivial hand-inspection.
+    """
+    return Path.home() / ".cct" / "titles.json"
+
+
+def _load_titles():
+    f = _titles_file()
+    if not f.exists():
+        return {}
+    try:
+        return json.loads(f.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_title_override(provider, session_id, title):
+    """Write a user-provided title for one session to the sidecar. Empty
+    or falsy ``title`` removes the override."""
+    f = _titles_file()
+    titles = _load_titles()
+    key = f"{provider}:{session_id}"
+    if title:
+        titles[key] = title
+    else:
+        titles.pop(key, None)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(titles, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def get_title_override(session):
+    return _load_titles().get(f"{session['provider']}:{session['session_id']}")
+
+
 def load_session_summary(session):
     """Populate ``session['summary']`` and ``session['display']`` in place.
 
@@ -937,10 +1101,16 @@ def load_session_summary(session):
     SQLite-based providers (opencode, forge) already set the summary at
     discovery time because their schema makes it cheap; for those we just
     skip the scan and go straight to display building.
+
+    The cct sidecar override (set by ``r``/``s`` actions in the picker)
+    wins over any provider-derived summary.
     """
     if session["display"] is not None:
         return
-    if session["summary"] is None:
+    override = get_title_override(session)
+    if override:
+        session["summary"] = override
+    elif session["summary"] is None:
         if session["provider"] == "claude":
             # Single pass picks up summary AND any user-set /rename name.
             meta = get_claude_session_metadata(session["filepath"])
@@ -2542,17 +2712,55 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
     for s in sessions:
         load_session_summary(s)
 
-    picked = select_session_action(sessions)
-    if picked is None:
-        click.echo("No session selected.")
-        return
+    # Loop so r/s actions can update a title and bounce back to the picker
+    # instead of forcing the user to relaunch cct after every rename.
+    while True:
+        picked = select_entry(
+            sessions,
+            actions={
+                "enter": "resume",
+                "h": "html",
+                "r": "rename",
+                "s": "summarize",
+            },
+        )
+        if picked is None:
+            click.echo("No session selected.")
+            return
 
-    session, action = picked
+        session, action = picked
 
-    if action == "resume":
-        # Replaces the current process — does not return.
-        resume_session(session)
-        return
+        if action == "rename":
+            new_title = prompt_for_title(default=session.get("summary") or "")
+            if new_title is None:  # Ctrl-C / EOF
+                continue
+            save_title_override(session["provider"], session["session_id"], new_title)
+            session["summary"] = new_title or None
+            session["display"] = None
+            load_session_summary(session)
+            continue
+
+        if action == "summarize":
+            click.echo(f"Summarizing {session['session_id']}...")
+            try:
+                title = summarize_session(session)
+            except click.ClickException as e:
+                click.echo(f"Summarize failed: {e.message}", err=True)
+                continue
+            save_title_override(session["provider"], session["session_id"], title)
+            session["summary"] = title
+            session["display"] = None
+            load_session_summary(session)
+            click.echo(f"Saved title: {title}")
+            continue
+
+        if action == "resume":
+            # Replaces the current process — does not return.
+            resume_session(session)
+            return
+
+        # action == "html"
+        break
 
     # action == "html"
     if session["provider"] != "claude":

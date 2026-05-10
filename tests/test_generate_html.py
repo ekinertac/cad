@@ -1749,6 +1749,49 @@ class TestFindForgeSessions:
         assert find_forge_sessions(db) == []
 
 
+class TestTitleOverrideSidecar:
+    """Sidecar lives at ~/.cct/titles.json, keyed by '<provider>:<id>'."""
+
+    def test_save_and_read_override(self, tmp_path, monkeypatch):
+        import claude_code_transcripts as ct
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        ct.save_title_override("claude", "abc-123", "My title")
+        sess = {"provider": "claude", "session_id": "abc-123"}
+        assert ct.get_title_override(sess) == "My title"
+
+    def test_empty_title_removes_override(self, tmp_path, monkeypatch):
+        import claude_code_transcripts as ct
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        ct.save_title_override("claude", "abc", "First")
+        ct.save_title_override("claude", "abc", "")
+        sess = {"provider": "claude", "session_id": "abc"}
+        assert ct.get_title_override(sess) is None
+
+    def test_override_wins_over_native_summary(self, tmp_path, monkeypatch):
+        """load_session_summary picks the override even when a provider
+        summary is already set (opencode/forge case)."""
+        import claude_code_transcripts as ct
+
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        ct.save_title_override("opencode", "ses_abc", "Custom name")
+
+        sess = {
+            "provider": "opencode",
+            "session_id": "ses_abc",
+            "filepath": Path("/fake.db"),
+            "cwd": "/Users/x",
+            "mtime": 1700000000.0,
+            "size": 0,
+            "summary": "Original DB title",
+            "display": None,
+        }
+        ct.load_session_summary(sess)
+        assert sess["summary"] == "Custom name"
+        assert "Custom name" in sess["display"]
+
+
 class TestResumeWritesCwdFile:
     """When CCT_CWD_FILE is set in the environment, resume_session writes
     the target cwd to that file before exec'ing claude. The shell wrapper
@@ -2228,6 +2271,69 @@ class TestLocalSessionCLI:
         result = CliRunner().invoke(cli, ["local"])
         assert result.exit_code == 0
         assert "No session selected" in result.output
+
+    def test_rename_action_saves_override_and_loops(self, tmp_path, monkeypatch):
+        """Pressing r prompts for a new title, saves it to the sidecar,
+        and re-enters the session picker. Picking 'resume' on the second
+        round then triggers the exec."""
+        from click.testing import CliRunner
+        from claude_code_transcripts import cli
+        import claude_code_transcripts as ct
+
+        _, real_cwd, _ = _set_up_fake_home_with_session(tmp_path, monkeypatch)
+
+        # Project pick, then session pick #1 = rename, then session pick #2 = resume
+        monkeypatch.setattr(
+            ct,
+            "select_entry",
+            _make_mock_select_entry(
+                [
+                    "__first__",
+                    ("__first__", "rename"),
+                    ("__first__", "resume"),
+                ]
+            ),
+        )
+        monkeypatch.setattr(ct, "prompt_for_title", lambda default="": "My session")
+        monkeypatch.setattr(ct.os, "execvp", lambda *a, **kw: None)
+        monkeypatch.setattr(ct.os, "chdir", lambda *a, **kw: None)
+
+        result = CliRunner().invoke(cli, ["local"])
+        assert result.exit_code == 0, result.output
+
+        # Sidecar was written
+        sess = {"provider": "claude", "session_id": "abc-123"}
+        assert ct.get_title_override(sess) == "My session"
+
+    def test_summarize_action_calls_llm_and_loops(self, tmp_path, monkeypatch):
+        """Pressing s runs summarize_session, saves its return as the
+        sidecar title, and loops back to the picker."""
+        from click.testing import CliRunner
+        from claude_code_transcripts import cli
+        import claude_code_transcripts as ct
+
+        _, real_cwd, _ = _set_up_fake_home_with_session(tmp_path, monkeypatch)
+
+        monkeypatch.setattr(
+            ct,
+            "select_entry",
+            _make_mock_select_entry(
+                [
+                    "__first__",
+                    ("__first__", "summarize"),
+                    ("__first__", "resume"),
+                ]
+            ),
+        )
+        monkeypatch.setattr(ct, "summarize_session", lambda session: "Generated title")
+        monkeypatch.setattr(ct.os, "execvp", lambda *a, **kw: None)
+        monkeypatch.setattr(ct.os, "chdir", lambda *a, **kw: None)
+
+        result = CliRunner().invoke(cli, ["local"])
+        assert result.exit_code == 0, result.output
+
+        sess = {"provider": "claude", "session_id": "abc-123"}
+        assert ct.get_title_override(sess) == "Generated title"
 
     def test_both_pickers_use_select_entry(self, tmp_path, monkeypatch):
         """Both pickers now route through the same select_entry function,
