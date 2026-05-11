@@ -24,11 +24,15 @@ Optional: `eval "$(cad shell-init zsh)"` in your rc file makes Enter (resume) le
 
 ## What it does
 
-Run `cad` with no arguments. You get a two-step picker.
+Run `cad` with no arguments.
 
-**Step 1 — projects.** Every directory where you have any agent sessions, sorted by most-recent activity. Provider badge per row: `(6c+5o+1f)` = 6 claude + 5 opencode + 1 forge. Sessions from any agent that share a working directory share an entry. Press **`r`** to rename a project end-to-end: `mv` the user folder, move claude's `~/.claude/{projects,file-history,todos,shell-snapshots}/` state, rewrite the embedded `cwd` in every JSONL, and back everything up to `~/.cad/agent-backups/` so a mistake is one `cp -R` away from being undone. *Do not run while the project's live claude session is open* — it moves files claude is actively writing.
+**Auto-pick.** If your shell is inside a known project's directory (or a subdirectory of one), cad skips the project picker and drops you straight into that project's session list. The common case becomes one keystroke. Pass `--all` to bypass the auto-pick when you want to see the full project list, or press Esc/Bksp once you're in to back out. Launching from `~/` or `~/Code` always shows the picker.
 
-**Step 2 — sessions in the chosen project.** Each row shows date, size, provider prefix, and a title (the first user prompt, your `/rename` text, or a cad-set override).
+**Step 1 — projects.** Every directory where you have any agent sessions, sorted by most-recent activity. Provider badge per row: `(6c+5o+1f)` = 6 claude + 5 opencode + 1 forge. Sessions from any agent that share a working directory share an entry. Shortcuts on this picker:
+- **`n`** — start a new claude session in this project (cd + exec).
+- **`r`** — rename a project end-to-end: `mv` the user folder, move claude's `~/.claude/{projects,file-history,todos,shell-snapshots}/` state, rewrite the embedded `cwd` in every JSONL, and back everything up to `~/.cad/agent-backups/` so a mistake is one `cp -R` away from being undone. *Do not run while the project's live claude session is open* — it moves files claude is actively writing.
+
+**Step 2 — sessions in the chosen project.** Each row shows date, size, provider prefix, and a title (the first user prompt, your `/rename` text, or a cad-set override). Programmatic `claude -p` sessions (from your SessionEnd hooks etc.) are hidden, matching `claude -r`'s own behavior.
 
 Both pickers support `/` for type-to-filter search.
 
@@ -39,6 +43,7 @@ On the session picker:
 | key | action |
 |---|---|
 | `Enter` | **Resume** in the right agent. `cd`s to the recorded cwd, then execs the agent's resume command (`claude --resume`, `codex resume`, `pi --session`, `opencode --session`, `forge --conversation-id`). For claude, skip-permissions is on by default — alarm fatigue is real. |
+| `n` | **New** claude session in this project's cwd (no `--resume`). |
 | `h` | **Render** the session to a paginated HTML transcript (claude only — other schemas need separate renderers). Honors `-o`, `--gist`, `--open`, `--json`. |
 | `r` | **Rename**: prompt for a new title, save it to `~/.cad/titles.json`. Wins over the provider's own summary. |
 | `s` | **Summarize** via LLM: pipes a session excerpt to `codex exec --ephemeral` (uses your ChatGPT-account auth, no API credits needed) and saves the 3-7 word title it returns. |

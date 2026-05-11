@@ -584,6 +584,44 @@ def resume_session(session):
     os.execvp(cmd[0], cmd)
 
 
+# Commands for starting a fresh session (no resume id). Currently
+# claude-only — other agents would slot in here when there's demand.
+PROVIDER_NEW_COMMANDS = {
+    "claude": ["claude", "--dangerously-skip-permissions"],
+}
+
+
+def new_session(cwd, provider="claude"):
+    """Replace this process with the agent CLI in ``cwd``, starting a
+    fresh session (no ``--resume``). Same chdir / CAD_CWD_FILE / execvp
+    plumbing as :func:`resume_session` so the shell wrapper also picks
+    up the new cwd post-exit.
+    """
+    if provider not in PROVIDER_NEW_COMMANDS:
+        click.echo(
+            f"Starting a new session isn't wired for {provider} yet — "
+            f"cd into the project and run the agent manually.",
+            err=True,
+        )
+        return
+    if not Path(cwd).is_dir():
+        click.echo(f"Project directory does not exist: {cwd}", err=True)
+        return
+
+    click.echo(f"Starting new {provider} session in {cwd}...")
+
+    cwd_file = os.environ.get("CAD_CWD_FILE")
+    if cwd_file:
+        try:
+            Path(cwd_file).write_text(cwd)
+        except OSError:
+            pass
+
+    os.chdir(cwd)
+    cmd = PROVIDER_NEW_COMMANDS[provider]
+    os.execvp(cmd[0], cmd)
+
+
 # `command cad` in the wrapper skips this function so the binary runs once.
 # zsh and bash get separate snippets only because the conditional syntax
 # differs slightly; the mechanism is identical.
@@ -998,6 +1036,31 @@ def _global_session_cwds():
     """
     home = str(Path.home())
     return {home, str(Path(home) / "Code")}
+
+
+def _find_project_for_cwd(projects, cwd):
+    """Return the project that 'owns' the given cwd, or None.
+
+    Match rules, in order:
+
+    1. Skip if cwd is a global cwd (``~/`` or ``~/Code``) — those are
+       Global Sessions territory; we don't auto-pick the catch-all bucket.
+    2. Exact match against any project's cwd.
+    3. Longest-prefix match — a project at ``/Users/x/Code/foo`` claims
+       any subdir like ``/Users/x/Code/foo/sub/dir``. The deepest match
+       wins when multiple ancestors are projects.
+    """
+    if cwd in _global_session_cwds():
+        return None
+    for p in projects:
+        if p["cwd"] == cwd:
+            return p
+    candidates = [
+        p for p in projects if p["cwd"] and cwd.startswith(p["cwd"].rstrip("/") + "/")
+    ]
+    if candidates:
+        return max(candidates, key=lambda p: len(p["cwd"]))
+    return None
 
 
 def _is_claude_queue_operation_session(filepath, scan_lines=50):
@@ -3191,7 +3254,15 @@ def shell_init_cmd(shell):
     is_flag=True,
     help="Open the generated index.html in your default browser (default if no -o specified).",
 )
-def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
+@click.option(
+    "--all",
+    "show_all_projects",
+    is_flag=True,
+    help="Skip the auto-pick: show the project picker even when launched inside a known project.",
+)
+def local_cmd(
+    output, output_auto, repo, gist, include_json, open_browser, show_all_projects
+):
     """Select a local agent session and either resume it or render to HTML.
 
     Sessions from claude (``~/.claude/projects/``) and codex
@@ -3220,6 +3291,14 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
         click.echo("No local sessions found.")
         return
 
+    # If launched from inside a known project, skip the project picker
+    # and drop straight into that project's session list — the common
+    # case. The user can press Esc/Bksp to back out to the full list, or
+    # pass --all to bypass the auto-pick entirely.
+    auto_pick = None
+    if not show_all_projects:
+        auto_pick = _find_project_for_cwd(projects, str(Path.cwd()))
+
     # Outer loop covers project → session → (back) → project navigation.
     # Esc/Bksp on the session picker returns the user here instead of
     # quitting; q on either picker still hard-quits.
@@ -3231,19 +3310,52 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
         # in a project to a new cwd — for when you've renamed the folder
         # on disk (`mv ~/Code/foo ~/Code/bar`) and want every session to
         # point at the new location in one go.
-        picked = select_entry(
-            projects,
-            actions={"enter": "open", "r": "rename"},
-            initial_selected=project_idx,
-        )
-        if picked is None:
-            click.echo("No project selected.")
+        if auto_pick is not None:
+            # First iteration only: cad was launched inside a known
+            # project. Skip the picker and drop straight into its
+            # sessions. Clear the auto-pick so back-navigation goes to
+            # the full project picker as expected.
+            selected_project = auto_pick
+            project_action = "open"
+            try:
+                project_idx = projects.index(auto_pick)
+            except ValueError:
+                project_idx = 0
+            auto_pick = None
+            click.echo(
+                f"Auto-opening project at {selected_project['cwd']} "
+                f"(Esc to see all, --all to skip auto-pick)"
+            )
+        else:
+            picked = select_entry(
+                projects,
+                actions={"enter": "open", "n": "new", "r": "rename"},
+                initial_selected=project_idx,
+            )
+            if picked is None:
+                click.echo("No project selected.")
+                return
+            selected_project, project_action = picked
+            try:
+                project_idx = projects.index(selected_project)
+            except ValueError:
+                project_idx = 0
+
+        if project_action == "new":
+            # Start a fresh claude session in this project's cwd. Doesn't
+            # pick up the virtual Global Sessions entry — there's no
+            # canonical cwd for it.
+            cwd = selected_project["cwd"]
+            if not cwd:
+                click.echo(
+                    "Can't start a new session in the virtual Global "
+                    "Sessions entry — no canonical cwd.",
+                    err=True,
+                )
+                continue
+            # Replaces the current process — does not return on success.
+            new_session(cwd)
             return
-        selected_project, project_action = picked
-        try:
-            project_idx = projects.index(selected_project)
-        except ValueError:
-            project_idx = 0
 
         if project_action == "rename":
             # Full project rename. cad handles every step so the user
@@ -3383,6 +3495,7 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
                 sessions,
                 actions={
                     "enter": "resume",
+                    "n": "new",
                     "h": "html",
                     "r": "rename",
                     "s": "summarize",
@@ -3413,6 +3526,12 @@ def local_cmd(output, output_auto, repo, gist, include_json, open_browser):
             if action == "peek":
                 peek_session(session)
                 continue
+
+            if action == "new":
+                # Start a fresh claude session in this project's cwd.
+                # Replaces the process — does not return on success.
+                new_session(selected_project["cwd"])
+                return
 
             if action == "rename":
                 new_title = prompt_for_title(default=session.get("summary") or "")

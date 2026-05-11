@@ -1364,6 +1364,54 @@ class TestQueueOperationFilter:
         assert ct._is_claude_queue_operation_session(f, scan_lines=50) is False
 
 
+class TestFindProjectForCwd:
+    """The auto-pick helper that decides whether to skip the project
+    picker when cad is launched inside a known project."""
+
+    def _project(self, cwd):
+        return {"name": Path(cwd).name, "cwd": cwd}
+
+    def test_exact_match(self):
+        import cad as ct
+
+        projects = [self._project("/Users/x/Code/foo")]
+        assert ct._find_project_for_cwd(projects, "/Users/x/Code/foo") is projects[0]
+
+    def test_subdir_match_picks_deepest(self):
+        import cad as ct
+
+        a = self._project("/Users/x/Code")
+        b = self._project("/Users/x/Code/foo")
+        # Subdir of foo should resolve to foo (deepest), not Code.
+        assert ct._find_project_for_cwd([a, b], "/Users/x/Code/foo/sub") is b
+
+    def test_global_cwd_returns_none(self, monkeypatch):
+        """Launching cad from ~/ or ~/Code shouldn't auto-pick the
+        catch-all bucket — show the full project list instead."""
+        import cad as ct
+
+        monkeypatch.setattr(Path, "home", lambda: Path("/Users/x"))
+        projects = [self._project("/Users/x"), self._project("/Users/x/Code/foo")]
+        assert ct._find_project_for_cwd(projects, "/Users/x") is None
+        assert ct._find_project_for_cwd(projects, "/Users/x/Code") is None
+
+    def test_unknown_cwd_returns_none(self):
+        import cad as ct
+
+        projects = [self._project("/Users/x/Code/foo")]
+        assert ct._find_project_for_cwd(projects, "/somewhere/else") is None
+
+    def test_virtual_project_with_none_cwd_is_not_matched(self):
+        """Global Sessions has cwd=None — it must never be auto-picked."""
+        import cad as ct
+
+        projects = [
+            {"name": "Global Sessions", "cwd": None},
+            self._project("/Users/x/Code/foo"),
+        ]
+        assert ct._find_project_for_cwd(projects, "/Users/x/Code/foo") is projects[1]
+
+
 class TestFindLocalProjects:
     """Tests for find_local_projects: cwd-based grouping across providers.
 
@@ -2653,6 +2701,77 @@ class TestLocalSessionCLI:
         result = CliRunner().invoke(cli, ["local"])
         assert result.exit_code == 0, result.output
         assert captured["entry"].get("_recently_updated") is True
+
+    def test_new_action_on_project_picker_launches_claude(self, tmp_path, monkeypatch):
+        """Pressing n on a project row execs `claude` (no resume) in the
+        project's cwd. Same chdir + CAD_CWD_FILE plumbing as resume."""
+        from click.testing import CliRunner
+        from cad import cli
+        import cad as ct
+
+        _, real_cwd, _ = _set_up_fake_home_with_session(tmp_path, monkeypatch)
+
+        def fake_select_entry(
+            entries, actions=None, back_action=None, initial_selected=0
+        ):
+            return entries[0], "new"
+
+        monkeypatch.setattr(ct, "select_entry", fake_select_entry)
+
+        exec_calls = []
+        monkeypatch.setattr(
+            ct.os,
+            "execvp",
+            lambda file, args: exec_calls.append((file, args, os.getcwd())),
+        )
+
+        result = CliRunner().invoke(cli, ["local"])
+        assert result.exit_code == 0, result.output
+        assert len(exec_calls) == 1
+        file, args, cwd_at_exec = exec_calls[0]
+        assert file == "claude"
+        # No --resume because this is a fresh session.
+        assert "--resume" not in args
+        assert "--dangerously-skip-permissions" in args
+        assert cwd_at_exec == str(real_cwd)
+
+    def test_auto_pick_when_inside_known_project(self, tmp_path, monkeypatch):
+        """If cad is launched from inside a known project's cwd, the
+        project picker is skipped — drop straight into that project's
+        session list."""
+        from click.testing import CliRunner
+        from cad import cli
+        import cad as ct
+
+        _, real_cwd, _ = _set_up_fake_home_with_session(tmp_path, monkeypatch)
+        # Pretend the user invoked `cad` from inside the project.
+        monkeypatch.setattr(ct, "Path", ct.Path)  # keep Path import
+        monkeypatch.chdir(real_cwd)
+
+        call_log = []
+
+        def fake_select_entry(
+            entries, actions=None, back_action=None, initial_selected=0
+        ):
+            call_log.append(
+                {
+                    "n_entries": len(entries),
+                    "back_action": back_action,
+                    "actions": actions,
+                }
+            )
+            # First (and only) call should be the session picker.
+            return None
+
+        monkeypatch.setattr(ct, "select_entry", fake_select_entry)
+
+        result = CliRunner().invoke(cli, ["local"])
+        assert result.exit_code == 0, result.output
+        # No project picker call — only the session picker (which has
+        # back_action="back").
+        assert len(call_log) == 1
+        assert call_log[0]["back_action"] == "back"
+        assert "Auto-opening project" in result.output
 
     def test_back_action_returns_to_project_picker(self, tmp_path, monkeypatch):
         """Esc/Bksp on the session picker routes back to the project
