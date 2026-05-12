@@ -1434,6 +1434,9 @@ class TestLiveClaudeDetection:
         import cad as ct
         import subprocess
 
+        # Override the test-suite default that skips live detection.
+        monkeypatch.delenv("CAD_NO_LIVE", raising=False)
+
         calls = []
 
         def fake_run(cmd, **kw):

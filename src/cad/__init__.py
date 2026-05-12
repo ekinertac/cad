@@ -1585,6 +1585,14 @@ def _apply_cwd_override(session):
 _CLAUDE_RESUME_ARG_RE = re.compile(r"--resume\s+([0-9a-f-]{36})")
 
 
+# Total wall-clock budget for live detection. lsof can hang on a single
+# weird PID (NFS, locked fd, kernel state); a hard ceiling guarantees
+# the picker is never blocked for more than this even if one lsof call
+# stalls. Set CAD_NO_LIVE=1 in env to skip detection entirely.
+_LIVE_DETECTION_BUDGET_SEC = 2.0
+_LIVE_DETECTION_PER_CALL_SEC = 1.0
+
+
 def find_live_claude_state():
     """Inspect running claude processes to discover which sessions are
     live. Returns a dict::
@@ -1600,61 +1608,67 @@ def find_live_claude_state():
     the caller resolves that heuristically by binding to the most recent
     JSONL(s) under the project's folder.
 
-    Best-effort: any subprocess error (pgrep/lsof/ps missing or denied)
-    silently returns empty state. The picker still works; it just won't
-    show live indicators.
+    Best-effort with a hard total time budget: any subprocess error
+    (pgrep/lsof/ps missing, slow, or denied), or breaching the budget,
+    silently returns the empty state. The picker still works; it just
+    won't show live indicators. Set ``CAD_NO_LIVE=1`` to skip entirely.
     """
     empty = {"bound_uuids": {}, "unbound_cwds": {}}
+    if os.environ.get("CAD_NO_LIVE"):
+        return empty
+
+    deadline = time.monotonic() + _LIVE_DETECTION_BUDGET_SEC
+
     try:
         result = subprocess.run(
             ["pgrep", "-x", "claude"],
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=_LIVE_DETECTION_PER_CALL_SEC,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         return empty
-    # pgrep exits 1 when no process matches — that's a clean "no live claudes"
     if result.returncode not in (0, 1):
         return empty
 
     bound = {}
     unbound = {}
     for pid_str in result.stdout.split():
+        if time.monotonic() > deadline:
+            # Out of budget. Return whatever we've gathered so far rather
+            # than block the picker any longer.
+            break
         try:
             pid = int(pid_str)
         except ValueError:
             continue
 
-        # Get cwd via lsof's `cwd` row.
         cwd = None
         try:
             lsof_out = subprocess.run(
                 ["lsof", "-p", str(pid)],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=_LIVE_DETECTION_PER_CALL_SEC,
             ).stdout
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             continue
         for line in lsof_out.splitlines():
             parts = line.split(None, 8)
             # lsof column layout: COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME
-            # FD == "cwd" rows are the process's working directory.
             if len(parts) >= 9 and parts[3] == "cwd":
                 cwd = parts[-1]
                 break
         if not cwd:
             continue
 
-        # Get argv via `ps -o args=`.
         args = ""
         try:
             args = subprocess.run(
                 ["ps", "-p", str(pid), "-o", "args="],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=_LIVE_DETECTION_PER_CALL_SEC,
             ).stdout.strip()
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             pass
