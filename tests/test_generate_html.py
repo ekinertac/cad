@@ -1319,19 +1319,16 @@ def _write_session(folder, name, summary="Session", cwd=None):
 
 
 class TestLiveCommand:
-    """`cad live` is a static dashboard view: only live sessions, grouped
-    by project, sorted within each group by state priority."""
+    """`cad live` is an interactive picker showing only live sessions,
+    auto-refreshing every 2 seconds."""
 
-    def test_live_groups_by_project_and_orders_by_state(self, tmp_path, monkeypatch):
-        from click.testing import CliRunner
-        from cad import cli
-        import cad as ct
-
+    def _setup_live_fixture(self, tmp_path, monkeypatch):
+        """Common scaffold: two real claude projects on disk with two
+        sessions each, plus monkeypatch home and the live-detection
+        helpers so we can pin which sessions look 'live'."""
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         monkeypatch.setattr(Path, "home", lambda: fake_home)
-
-        # Two real projects with sessions on disk.
         for proj_name in ("alpha", "beta"):
             d = fake_home / ".claude" / "projects" / f"-Users-x-Code-{proj_name}"
             d.mkdir(parents=True)
@@ -1341,58 +1338,95 @@ class TestLiveCommand:
                     f'{{"type":"user","cwd":"/Users/x/Code/{proj_name}",'
                     f'"message":{{"content":"hi from {sid}"}}}}\n'
                 )
+        return fake_home
 
-        # Stub the live-detection step so we can pin which sessions are
-        # live + what state without juggling real subprocesses.
-        def fake_state():
-            return {
+    def test_build_live_entries_filters_and_groups(self, tmp_path, monkeypatch):
+        """_build_live_entries returns one entry per live session,
+        sorted within each project by state priority."""
+        import cad as ct
+
+        self._setup_live_fixture(tmp_path, monkeypatch)
+
+        monkeypatch.setattr(
+            ct,
+            "find_live_claude_state",
+            lambda: {
                 "bound_uuids": {
                     "alpha-1": {"pid": 1, "cwd": "/Users/x/Code/alpha"},
                     "alpha-2": {"pid": 2, "cwd": "/Users/x/Code/alpha"},
                     "beta-1": {"pid": 3, "cwd": "/Users/x/Code/beta"},
                 },
                 "unbound_cwds": {},
-            }
+            },
+        )
 
-        # Drive the annotator: alpha-1 working, alpha-2 idle, beta-1 input.
         def fake_annotate(sessions, _state, now=None):
-            for s in sessions:
-                s["live"] = False
-                s["state"] = "idle"
             states = {
                 "alpha-1": "working",
                 "alpha-2": "idle",
                 "beta-1": "input",
             }
             for s in sessions:
-                if s["session_id"] in states:
-                    s["live"] = True
-                    s["state"] = states[s["session_id"]]
+                s["state"] = states.get(s["session_id"], "idle")
+                s["live"] = s["session_id"] in states
 
-        monkeypatch.setattr(ct, "find_live_claude_state", fake_state)
         monkeypatch.setattr(ct, "_annotate_sessions_with_live_state", fake_annotate)
+
+        entries = ct._build_live_entries()
+        # 3 live sessions; beta-2 (not in states map) is excluded.
+        assert len(entries) == 3
+        sids = [e["session_id"] for e in entries]
+        assert "beta-2" not in sids
+        # Within the alpha group (rows sharing the project name in
+        # display), working comes before idle.
+        alpha_entries = [e for e in entries if "alpha" in e["display"]]
+        assert alpha_entries[0]["state"] == "working"
+        assert alpha_entries[1]["state"] == "idle"
+
+    def test_live_command_passes_refresh_callback_to_picker(
+        self, tmp_path, monkeypatch
+    ):
+        """The picker is wired with a refresh callback so state changes
+        in the underlying processes show up without re-running."""
+        from click.testing import CliRunner
+        from cad import cli
+        import cad as ct
+
+        self._setup_live_fixture(tmp_path, monkeypatch)
+
+        monkeypatch.setattr(
+            ct,
+            "find_live_claude_state",
+            lambda: {
+                "bound_uuids": {"alpha-1": {"pid": 1, "cwd": "/Users/x/Code/alpha"}},
+                "unbound_cwds": {},
+            },
+        )
+
+        def fake_annotate(sessions, _state, now=None):
+            for s in sessions:
+                s["live"] = s["session_id"] == "alpha-1"
+                s["state"] = "working" if s["live"] else "idle"
+
+        monkeypatch.setattr(ct, "_annotate_sessions_with_live_state", fake_annotate)
+
+        captured = {}
+
+        def fake_select(entries, **kwargs):
+            captured["kwargs"] = kwargs
+            captured["entries"] = list(entries)
+            return None  # simulate user cancel
+
+        monkeypatch.setattr(ct, "select_entry", fake_select)
 
         result = CliRunner().invoke(cli, ["live"])
         assert result.exit_code == 0, result.output
+        assert "refresh_callback" in captured["kwargs"]
+        assert captured["kwargs"]["refresh_callback"] is ct._build_live_entries
+        assert len(captured["entries"]) == 1
+        assert captured["entries"][0]["session_id"] == "alpha-1"
 
-        # Both project headings appear; alpha lists 2 live sessions and
-        # beta lists 1. beta-2 is not live → not listed.
-        assert "alpha" in result.output
-        assert "beta" in result.output
-        assert "beta-2" not in result.output
-        # Within alpha's section, [working] must come before [idle] —
-        # state-priority sort puts the row that most likely needs
-        # attention at the top of the project group.
-        alpha_section = result.output.split("alpha", 1)[1]
-        # beta might come before or after alpha (sort by mtime), trim
-        # alpha_section at the next project heading if any.
-        if "\nbeta" in alpha_section:
-            alpha_section = alpha_section.split("\nbeta", 1)[0]
-        assert "[working]" in alpha_section
-        assert "[idle]" in alpha_section
-        assert alpha_section.index("[working]") < alpha_section.index("[idle]")
-
-    def test_live_says_so_when_nothing_is_live(self, tmp_path, monkeypatch):
+    def test_live_command_says_so_when_nothing_is_live(self, tmp_path, monkeypatch):
         from click.testing import CliRunner
         from cad import cli
         import cad as ct
@@ -1400,14 +1434,11 @@ class TestLiveCommand:
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         monkeypatch.setattr(Path, "home", lambda: fake_home)
-
         proj = fake_home / ".claude" / "projects" / "-Users-x-Code-foo"
         proj.mkdir(parents=True)
         (proj / "abc.jsonl").write_text(
             '{"type":"user","cwd":"/Users/x/Code/foo",' '"message":{"content":"hi"}}\n'
         )
-
-        # No live processes.
         monkeypatch.setattr(
             ct,
             "find_live_claude_state",

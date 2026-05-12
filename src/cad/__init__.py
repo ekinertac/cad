@@ -279,7 +279,14 @@ def find_local_sessions(folder, limit=10):
     return results[:limit]
 
 
-def select_entry(entries, actions=None, back_action=None, initial_selected=0):
+def select_entry(
+    entries,
+    actions=None,
+    back_action=None,
+    initial_selected=0,
+    refresh_callback=None,
+    refresh_interval=2.0,
+):
     """Interactive list picker with per-key actions and modal search.
 
     ``actions`` is a dict mapping key names to action labels, e.g.
@@ -296,6 +303,12 @@ def select_entry(entries, actions=None, back_action=None, initial_selected=0):
     ``initial_selected``: 0-based index the cursor starts on. Callers
     that re-enter the picker after a peek/rename pass the previous
     selection here so the user comes back to the same row.
+
+    ``refresh_callback`` (optional): a function ``() -> list[dict]`` that
+    recomputes entries. If passed, a daemon thread invokes it every
+    ``refresh_interval`` seconds, mutates ``entries`` in place, and
+    triggers a redraw. Used by ``cad live`` so process-state changes
+    surface without re-running the command.
 
     Each entry must be a dict with at least ``display`` populated. The full
     entry dict is passed back to the caller so it can dispatch on whatever
@@ -543,13 +556,60 @@ def select_entry(entries, actions=None, back_action=None, initial_selected=0):
     # erase_when_done removes the picker's frame from the terminal on exit
     # so re-entering after a rename/summarize action doesn't leave a stack
     # of duplicate frames in the scrollback.
-    Application(
+    app = Application(
         layout=layout,
         key_bindings=kb,
         style=style,
         full_screen=False,
         erase_when_done=True,
-    ).run()
+    )
+
+    # Background refresh thread, only when a refresh_callback is wired.
+    # Runs as a daemon so it doesn't block process exit; an Event lets us
+    # tell it to stop politely once the app's done.
+    stop_refresh = None
+    if refresh_callback:
+        import threading
+
+        stop_refresh = threading.Event()
+
+        def _refresh_loop():
+            while not stop_refresh.wait(refresh_interval):
+                try:
+                    new_entries = refresh_callback()
+                except Exception:
+                    continue
+                # Preserve cursor on the same session-id when possible —
+                # otherwise a refresh that adds/removes a row would
+                # bounce the user to a different session mid-scroll.
+                current_key = None
+                idx = state["selected"]
+                if 0 <= idx < len(entries):
+                    current_key = entries[idx].get("session_id") or entries[idx].get(
+                        "display"
+                    )
+                entries.clear()
+                entries.extend(new_entries)
+                if current_key is not None:
+                    for i, e in enumerate(entries):
+                        if (
+                            e.get("session_id") == current_key
+                            or e.get("display") == current_key
+                        ):
+                            state["selected"] = i
+                            break
+                try:
+                    app.invalidate()
+                except Exception:
+                    pass
+
+        threading.Thread(target=_refresh_loop, daemon=True).start()
+
+    try:
+        app.run()
+    finally:
+        if stop_refresh is not None:
+            stop_refresh.set()
     return state["result"]
 
 
@@ -3426,61 +3486,96 @@ def shell_init_cmd(shell):
     click.echo(SHELL_WRAPPERS[shell], nl=False)
 
 
-# Display labels + click colours for each live-session state. Used by
-# `cad live` to render its dashboard rows.
-_STATE_LABELS = {
-    "working": ("[working]", "bright_green"),
-    "input": ("[input]  ", "yellow"),
-    "idle": ("[idle]   ", "bright_black"),
+# Text labels shown next to the coloured dot on each live-picker row.
+# Padded to a fixed width so columns stay aligned regardless of state.
+_STATE_TEXT_LABELS = {
+    "working": "[working]",
+    "input": "[input]  ",
+    "idle": "[idle]   ",
 }
+
+
+def _build_live_entries():
+    """Snapshot of every live agent session across all projects, ready
+    to feed into ``select_entry``. Sessions are grouped by project name
+    (rendered into each row's display) and ordered: working first, then
+    input, then idle, so the row most likely needing attention is at
+    the top of each project group. Outer order matches the project
+    picker (most-recent-activity first).
+    """
+    projects = find_local_projects()
+    entries = []
+    state_order = {"working": 0, "input": 1, "idle": 2}
+    for p in projects:
+        live = [s for s in p["sessions"] if s.get("live")]
+        if not live:
+            continue
+        live.sort(key=lambda s: state_order.get(s.get("state"), 3))
+        for s in live:
+            load_session_summary(s)
+            label = _STATE_TEXT_LABELS.get(s.get("state"), "[?]      ")
+            # session["display"] is "<date>  <size>  provider/<rest>".
+            # Drop the date+size column — the state label already
+            # telegraphs recency, and screen real estate is precious.
+            display = s["display"]
+            provider_marker = f"{s['provider']}/"
+            idx = display.find(provider_marker)
+            tail = display[idx:] if idx >= 0 else display
+            entries.append(
+                {
+                    # Mirror the session dict shape so resume_session
+                    # and the existing select_entry rendering both work
+                    # without special-casing.
+                    "provider": s["provider"],
+                    "session_id": s["session_id"],
+                    "cwd": s["cwd"],
+                    "filepath": s["filepath"],
+                    "mtime": s["mtime"],
+                    "live": s["live"],
+                    "state": s["state"],
+                    "display": f"{label}  {p['name']:<28} {tail}",
+                }
+            )
+    return entries
 
 
 @cli.command("live")
 def live_cmd():
-    """Dashboard of running agent sessions across all projects.
+    """Interactive dashboard of running agent sessions across all
+    projects. Refreshes every 2 seconds so working/input/idle
+    transitions surface without re-running the command.
 
-    Flat list grouped by project, showing only sessions whose underlying
-    agent process is alive. State per row:
+    Rows are grouped by project (project name shown inline on each
+    row) and sorted within each group by state priority — anything
+    needing attention floats up.
 
-    - ``[working]`` — last JSONL write within 10s (claude is producing
-      output or running a tool right now).
-    - ``[input]`` — process alive, no recent writes within 5 min
+    - ``[working]`` (green dot) — last JSONL write within 10s
+      (claude is producing output or running a tool right now).
+    - ``[input]`` (yellow dot) — alive, no recent writes within 5 min
       (claude printed its turn; waiting on you).
-    - ``[idle]`` — process alive but no activity in 5+ min (probably
+    - ``[idle]`` (dim dot) — alive but stale for 5+ min (probably
       forgotten about).
 
-    One-shot snapshot — re-run for fresh state. (Pair with ``watch -n 5
-    cad live`` if you want a live dashboard in another terminal.)
+    Enter resumes the highlighted session in its agent CLI.
+    Esc / q quits.
     """
-    click.echo("Loading projects...")
-    projects = find_local_projects()
-    live_projects = [p for p in projects if p.get("live_count")]
-    if not live_projects:
+    click.echo("Loading live sessions...")
+    entries = _build_live_entries()
+    if not entries:
         click.echo("No live agent sessions.")
         return
 
-    for p in live_projects:
-        # Project heading.
-        click.echo()
-        click.secho(p["name"], bold=True)
-        # Live sessions only, sorted by state priority (working first,
-        # then input, then idle) so the row that most likely needs
-        # attention is at the top of each project group.
-        live = [s for s in p["sessions"] if s.get("live")]
-        state_order = {"working": 0, "input": 1, "idle": 2}
-        live.sort(key=lambda s: state_order.get(s.get("state"), 3))
-        for s in live:
-            load_session_summary(s)
-            label, colour = _STATE_LABELS.get(s.get("state"), ("[?]", "white"))
-            # Trim the date+size column from session display since the
-            # state label already telegraphs "is this recent?".
-            display = s["display"]
-            # display is "<date>  <size>  provider/<rest>" — split off the
-            # provider/ prefix and use only what comes after.
-            provider_marker = f"{s['provider']}/"
-            idx = display.find(provider_marker)
-            tail = display[idx:] if idx >= 0 else display
-            click.echo("    " + click.style(label, fg=colour) + "  " + tail)
+    picked = select_entry(
+        entries,
+        actions={"enter": "resume"},
+        refresh_callback=_build_live_entries,
+        refresh_interval=2.0,
+    )
+    if picked is None:
+        return
+    session, _ = picked
+    # Reuse the existing resume path: chdir + exec the right agent CLI.
+    resume_session(session)
 
 
 @cli.command("local")
