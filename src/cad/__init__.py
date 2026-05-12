@@ -641,7 +641,22 @@ def resume_session(session):
     A child process can't change its parent shell's working directory; the
     optional shell wrapper installed via ``cad shell-init`` reads
     ``$CAD_CWD_FILE`` after the agent exits and cd's the parent shell.
+
+    Guardrail: refuses to resume a session that's already live in another
+    terminal. Spawning a second agent process on the same JSONL would
+    cause interleaved writes and scramble the conversation order. The
+    user must close the other terminal (or use peek) instead.
     """
+    if session.get("live"):
+        click.echo(
+            "Refusing to resume: this session is currently active in "
+            "another terminal. Spawning a second agent on the same "
+            "session file would corrupt it. Close that terminal first, "
+            "or use peek (`p` in the picker) to view it read-only.",
+            err=True,
+        )
+        return
+
     provider = session["provider"]
     cwd = session["cwd"]
     session_id = session["session_id"]
@@ -3556,7 +3571,13 @@ def live_cmd():
     - ``[idle]`` (dim dot) — alive but stale for 5+ min (probably
       forgotten about).
 
-    Enter resumes the highlighted session in its agent CLI.
+    Enter peeks the highlighted session: opens its conversation so far
+    in $PAGER (read-only, won't disturb the running agent). Resume is
+    intentionally NOT bound here — every row by definition has an
+    agent process writing to its JSONL, and spawning a second one
+    would corrupt the conversation. Switch to the original terminal
+    or close it before resuming via `cad local`.
+
     Esc / q quits.
     """
     click.echo("Loading live sessions...")
@@ -3567,15 +3588,18 @@ def live_cmd():
 
     picked = select_entry(
         entries,
-        actions={"enter": "resume"},
+        # Enter = peek (snapshot view) because every row is a live
+        # process. Resuming any of them would mean two agents on the
+        # same JSONL.
+        actions={"enter": "peek"},
         refresh_callback=_build_live_entries,
         refresh_interval=2.0,
     )
     if picked is None:
         return
     session, _ = picked
-    # Reuse the existing resume path: chdir + exec the right agent CLI.
-    resume_session(session)
+    # Same peek path the session picker uses for `p`.
+    peek_session(session)
 
 
 @cli.command("local")

@@ -1383,6 +1383,82 @@ class TestLiveCommand:
         assert alpha_entries[0]["state"] == "working"
         assert alpha_entries[1]["state"] == "idle"
 
+    def test_resume_session_refuses_when_live(self, monkeypatch):
+        """Bottom-of-stack guardrail: even if a caller manages to invoke
+        resume_session on a live session, we refuse before exec'ing.
+        Two agents on one JSONL = scrambled conversation. The check
+        covers cad local, cad live, and any future callers."""
+        import cad as ct
+
+        called = {"execvp": False, "chdir": False}
+        monkeypatch.setattr(
+            ct.os,
+            "execvp",
+            lambda *a, **kw: called.__setitem__("execvp", True),
+        )
+        monkeypatch.setattr(
+            ct.os,
+            "chdir",
+            lambda *a, **kw: called.__setitem__("chdir", True),
+        )
+
+        session = {
+            "provider": "claude",
+            "session_id": "abc-123",
+            "cwd": "/tmp",
+            "live": True,
+        }
+        ct.resume_session(session)
+        assert called["execvp"] is False
+        assert called["chdir"] is False
+
+    def test_live_command_enter_invokes_peek_not_resume(self, tmp_path, monkeypatch):
+        """`cad live`'s Enter must NOT resume — every row by definition
+        is live and resuming would corrupt the session. It should peek
+        instead (read-only snapshot)."""
+        from click.testing import CliRunner
+        from cad import cli
+        import cad as ct
+
+        self._setup_live_fixture(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            ct,
+            "find_live_claude_state",
+            lambda: {
+                "bound_uuids": {"alpha-1": {"pid": 1, "cwd": "/Users/x/Code/alpha"}},
+                "unbound_cwds": {},
+            },
+        )
+
+        def fake_annotate(sessions, _state, now=None):
+            for s in sessions:
+                s["live"] = s["session_id"] == "alpha-1"
+                s["state"] = "working" if s["live"] else "idle"
+
+        monkeypatch.setattr(ct, "_annotate_sessions_with_live_state", fake_annotate)
+
+        captured = {}
+
+        def fake_select(entries, **kwargs):
+            captured["actions"] = kwargs.get("actions")
+            return (entries[0], list(captured["actions"].values())[0])
+
+        peek_calls = []
+        resume_calls = []
+        monkeypatch.setattr(ct, "select_entry", fake_select)
+        monkeypatch.setattr(
+            ct, "peek_session", lambda s: peek_calls.append(s["session_id"])
+        )
+        monkeypatch.setattr(
+            ct, "resume_session", lambda s: resume_calls.append(s["session_id"])
+        )
+
+        result = CliRunner().invoke(cli, ["live"])
+        assert result.exit_code == 0, result.output
+        assert captured["actions"] == {"enter": "peek"}
+        assert peek_calls == ["alpha-1"]
+        assert resume_calls == []
+
     def test_live_command_passes_refresh_callback_to_picker(
         self, tmp_path, monkeypatch
     ):
