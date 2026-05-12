@@ -902,9 +902,13 @@ def get_session_transcript(session, max_chars=200_000):
 
 def peek_session(session):
     """Render the session's prompts/replies to a temp markdown file and
-    open it in ``$PAGER`` (fallback ``less -R``). Blocks until the user
+    open it in ``$PAGER`` (fallback ``less``). Blocks until the user
     quits the pager, then unlinks the temp file. less uses the alternate
-    screen so cct's terminal state is restored on exit — Quick Look–style.
+    screen so cad's terminal state is restored on exit — Quick Look-style.
+
+    Opens at the *bottom* of the file (most recent turns) since that's
+    what's relevant for an in-progress live session. Scroll up to see
+    earlier history.
     """
     transcript = get_session_transcript(session)
     if not transcript:
@@ -922,16 +926,17 @@ def peek_session(session):
         lines.append(text)
         lines.append("")
 
-    fd, path = tempfile.mkstemp(prefix="cct-peek-", suffix=".md")
+    fd, path = tempfile.mkstemp(prefix="cad-peek-", suffix=".md")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write("\n".join(lines))
         pager = os.environ.get("PAGER") or "less"
         args = [pager]
-        # `-R` lets ANSI colours through if the user's pager prints any;
-        # harmless if not.
+        # less-specific flags: `-R` passes ANSI colours, `+G` opens at
+        # end of file so the user sees the most recent turns first.
+        # Skip if $PAGER is something else (we can't assume its flags).
         if Path(pager).name == "less":
-            args.append("-R")
+            args += ["-R", "+G"]
         args.append(path)
         try:
             subprocess.run(args)
