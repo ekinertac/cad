@@ -1645,8 +1645,13 @@ def find_live_claude_state():
 
         cwd = None
         try:
+            # `-P -n` skips port-number and IP-to-hostname resolution.
+            # Without them lsof does blocking reverse-DNS for every open
+            # network socket — measured at 8s vs 0.03s for one claude on
+            # the developer's machine. We only care about the `cwd` row
+            # so DNS is pure overhead.
             lsof_out = subprocess.run(
-                ["lsof", "-p", str(pid)],
+                ["lsof", "-Pn", "-p", str(pid)],
                 capture_output=True,
                 text=True,
                 timeout=_LIVE_DETECTION_PER_CALL_SEC,

@@ -1450,7 +1450,7 @@ class TestLiveClaudeDetection:
             r = R()
             if cmd[:2] == ["pgrep", "-x"]:
                 r.stdout = "42\n"
-            elif cmd[:2] == ["lsof", "-p"]:
+            elif cmd[0] == "lsof":
                 r.stdout = (
                     "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"
                     "claude  42  x    cwd  DIR    1,2   64  3   /Users/x/Code/foo\n"
