@@ -1318,6 +1318,107 @@ def _write_session(folder, name, summary="Session", cwd=None):
     return f
 
 
+class TestLiveCommand:
+    """`cad live` is a static dashboard view: only live sessions, grouped
+    by project, sorted within each group by state priority."""
+
+    def test_live_groups_by_project_and_orders_by_state(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+        from cad import cli
+        import cad as ct
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        # Two real projects with sessions on disk.
+        for proj_name in ("alpha", "beta"):
+            d = fake_home / ".claude" / "projects" / f"-Users-x-Code-{proj_name}"
+            d.mkdir(parents=True)
+            for sid in (f"{proj_name}-1", f"{proj_name}-2"):
+                (d / f"{sid}.jsonl").write_text(
+                    '{"type":"summary","summary":"x"}\n'
+                    f'{{"type":"user","cwd":"/Users/x/Code/{proj_name}",'
+                    f'"message":{{"content":"hi from {sid}"}}}}\n'
+                )
+
+        # Stub the live-detection step so we can pin which sessions are
+        # live + what state without juggling real subprocesses.
+        def fake_state():
+            return {
+                "bound_uuids": {
+                    "alpha-1": {"pid": 1, "cwd": "/Users/x/Code/alpha"},
+                    "alpha-2": {"pid": 2, "cwd": "/Users/x/Code/alpha"},
+                    "beta-1": {"pid": 3, "cwd": "/Users/x/Code/beta"},
+                },
+                "unbound_cwds": {},
+            }
+
+        # Drive the annotator: alpha-1 working, alpha-2 idle, beta-1 input.
+        def fake_annotate(sessions, _state, now=None):
+            for s in sessions:
+                s["live"] = False
+                s["state"] = "idle"
+            states = {
+                "alpha-1": "working",
+                "alpha-2": "idle",
+                "beta-1": "input",
+            }
+            for s in sessions:
+                if s["session_id"] in states:
+                    s["live"] = True
+                    s["state"] = states[s["session_id"]]
+
+        monkeypatch.setattr(ct, "find_live_claude_state", fake_state)
+        monkeypatch.setattr(ct, "_annotate_sessions_with_live_state", fake_annotate)
+
+        result = CliRunner().invoke(cli, ["live"])
+        assert result.exit_code == 0, result.output
+
+        # Both project headings appear; alpha lists 2 live sessions and
+        # beta lists 1. beta-2 is not live → not listed.
+        assert "alpha" in result.output
+        assert "beta" in result.output
+        assert "beta-2" not in result.output
+        # Within alpha's section, [working] must come before [idle] —
+        # state-priority sort puts the row that most likely needs
+        # attention at the top of the project group.
+        alpha_section = result.output.split("alpha", 1)[1]
+        # beta might come before or after alpha (sort by mtime), trim
+        # alpha_section at the next project heading if any.
+        if "\nbeta" in alpha_section:
+            alpha_section = alpha_section.split("\nbeta", 1)[0]
+        assert "[working]" in alpha_section
+        assert "[idle]" in alpha_section
+        assert alpha_section.index("[working]") < alpha_section.index("[idle]")
+
+    def test_live_says_so_when_nothing_is_live(self, tmp_path, monkeypatch):
+        from click.testing import CliRunner
+        from cad import cli
+        import cad as ct
+
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr(Path, "home", lambda: fake_home)
+
+        proj = fake_home / ".claude" / "projects" / "-Users-x-Code-foo"
+        proj.mkdir(parents=True)
+        (proj / "abc.jsonl").write_text(
+            '{"type":"user","cwd":"/Users/x/Code/foo",' '"message":{"content":"hi"}}\n'
+        )
+
+        # No live processes.
+        monkeypatch.setattr(
+            ct,
+            "find_live_claude_state",
+            lambda: {"bound_uuids": {}, "unbound_cwds": {}},
+        )
+
+        result = CliRunner().invoke(cli, ["live"])
+        assert result.exit_code == 0
+        assert "No live agent sessions" in result.output
+
+
 class TestLiveClaudeDetection:
     """Live-session detection: process inspection via pgrep+lsof+ps,
     plus the pure annotation step that maps detected processes onto
@@ -1353,7 +1454,10 @@ class TestLiveClaudeDetection:
         assert sessions[1]["live"] is False
         assert sessions[1]["state"] == "idle"
 
-    def test_waiting_state_when_mtime_is_stale(self):
+    def test_input_state_when_mtime_is_stale(self):
+        """Between 10s and 5min since last JSONL write = "input": the
+        process is alive but the conversation has gone quiet, so claude
+        is most likely sitting at the prompt waiting on the user."""
         import cad as ct
 
         sessions = [
@@ -1368,11 +1472,32 @@ class TestLiveClaudeDetection:
             "bound_uuids": {"abc-123": {"pid": 100, "cwd": "/x"}},
             "unbound_cwds": {},
         }
-        # 30 seconds after mtime → "waiting" (claude printed its reply
-        # and is sitting at the prompt).
         ct._annotate_sessions_with_live_state(sessions, state, now=1_030.0)
         assert sessions[0]["live"] is True
-        assert sessions[0]["state"] == "waiting"
+        assert sessions[0]["state"] == "input"
+
+    def test_idle_state_when_mtime_is_very_stale(self):
+        """A live process that's been quiet for 5+ minutes is probably
+        abandoned — classify as idle so the dashboard doesn't pretend
+        anything's happening there."""
+        import cad as ct
+
+        sessions = [
+            {
+                "provider": "claude",
+                "session_id": "abc-123",
+                "cwd": "/x",
+                "mtime": 1_000.0,
+            }
+        ]
+        state = {
+            "bound_uuids": {"abc-123": {"pid": 100, "cwd": "/x"}},
+            "unbound_cwds": {},
+        }
+        # 10 minutes after last write → idle
+        ct._annotate_sessions_with_live_state(sessions, state, now=1_600.0)
+        assert sessions[0]["live"] is True
+        assert sessions[0]["state"] == "idle"
 
     def test_unbound_cwd_binds_to_most_recent_jsonls(self):
         """A fresh `claude` (no --resume) gives us a live cwd but no

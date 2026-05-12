@@ -363,13 +363,15 @@ def select_entry(entries, actions=None, back_action=None, initial_selected=0):
             arrow = "» " if sel else "  "
             entry = entries[src_i]
             # Two-char status marker slot keeps columns aligned. Live
-            # sessions render a coloured dot (green = working, yellow =
-            # waiting); idle rows just get two spaces.
+            # sessions render a coloured dot — green=working,
+            # yellow=needs input, dim=idle.
             entry_state = entry.get("state")
-            if entry_state == "working":
+            if entry.get("live") and entry_state == "working":
                 marker, marker_style = "● ", "class:state-working"
-            elif entry_state == "waiting":
-                marker, marker_style = "● ", "class:state-waiting"
+            elif entry.get("live") and entry_state == "input":
+                marker, marker_style = "● ", "class:state-input"
+            elif entry.get("live") and entry_state == "idle":
+                marker, marker_style = "● ", "class:state-idle"
             else:
                 marker, marker_style = "  ", ""
             # Green-highlight rows touched (rename / summarize) in this cad
@@ -531,9 +533,11 @@ def select_entry(entries, actions=None, back_action=None, initial_selected=0):
             # only highlights what changed since cad launched.
             "updated": "fg:ansibrightgreen bold",
             # Live-session markers: green = actively producing output,
-            # yellow = process alive but idle at the prompt.
+            # yellow = process alive waiting for the user, grey = alive
+            # but stale (probably abandoned).
             "state-working": "fg:ansibrightgreen bold",
-            "state-waiting": "fg:ansiyellow",
+            "state-input": "fg:ansiyellow",
+            "state-idle": "fg:ansibrightblack",
         }
     )
     # erase_when_done removes the picker's frame from the terminal on exit
@@ -1689,21 +1693,31 @@ def find_live_claude_state():
 
 def _annotate_sessions_with_live_state(sessions, live_state, now=None):
     """Tag each session in place with ``live`` (bool) and ``state``
-    (``working`` / ``waiting`` / ``idle``). Pure function (no I/O beyond
+    (``working`` / ``input`` / ``idle``). Pure function (no I/O beyond
     reading session["mtime"]) so it's trivially testable.
 
-    Working vs waiting is decided by JSONL mtime recency: <10s = working
-    (still streaming/tool-using), older = waiting (claude has printed its
-    response and is sitting at the prompt).
+    State classification for live (process-alive) sessions by JSONL mtime:
+    - ``working`` (<10s): still streaming tokens or running a tool
+    - ``input`` (10s-5min): claude printed its turn and is at the prompt
+      waiting for the user
+    - ``idle`` (>5min): alive but stale — probably forgotten about
+
+    Non-live sessions are always ``idle``.
     """
     if now is None:
         now = time.time()
     bound = live_state.get("bound_uuids", {})
     unbound = live_state.get("unbound_cwds", {})
-    WORKING_WINDOW = 10  # seconds since last JSONL write
+    WORKING_WINDOW = 10  # seconds — still streaming
+    INPUT_WINDOW = 300  # 5 minutes — within reach of user; older = idle
 
     def _state_from_mtime(s):
-        return "working" if (now - s["mtime"]) < WORKING_WINDOW else "waiting"
+        age = now - s["mtime"]
+        if age < WORKING_WINDOW:
+            return "working"
+        if age < INPUT_WINDOW:
+            return "input"
+        return "idle"
 
     # Default everything to idle first.
     for s in sessions:
@@ -1975,11 +1989,11 @@ def _group_sessions_into_projects(sessions):
         # already applied by _annotate_sessions_with_live_state.
         live_count = sum(1 for s in sess if s.get("live"))
         # Project state reflects the most active session: working beats
-        # waiting beats idle. Picker uses this to colour the row marker.
-        if any(s.get("state") == "working" for s in sess):
+        # input beats idle. Picker uses this to colour the row marker.
+        if any(s.get("live") and s.get("state") == "working" for s in sess):
             project_state = "working"
-        elif any(s.get("state") == "waiting" for s in sess):
-            project_state = "waiting"
+        elif any(s.get("live") and s.get("state") == "input" for s in sess):
+            project_state = "input"
         else:
             project_state = "idle"
         return {
@@ -3410,6 +3424,63 @@ def shell_init_cmd(shell):
     parent shell.
     """
     click.echo(SHELL_WRAPPERS[shell], nl=False)
+
+
+# Display labels + click colours for each live-session state. Used by
+# `cad live` to render its dashboard rows.
+_STATE_LABELS = {
+    "working": ("[working]", "bright_green"),
+    "input": ("[input]  ", "yellow"),
+    "idle": ("[idle]   ", "bright_black"),
+}
+
+
+@cli.command("live")
+def live_cmd():
+    """Dashboard of running agent sessions across all projects.
+
+    Flat list grouped by project, showing only sessions whose underlying
+    agent process is alive. State per row:
+
+    - ``[working]`` — last JSONL write within 10s (claude is producing
+      output or running a tool right now).
+    - ``[input]`` — process alive, no recent writes within 5 min
+      (claude printed its turn; waiting on you).
+    - ``[idle]`` — process alive but no activity in 5+ min (probably
+      forgotten about).
+
+    One-shot snapshot — re-run for fresh state. (Pair with ``watch -n 5
+    cad live`` if you want a live dashboard in another terminal.)
+    """
+    click.echo("Loading projects...")
+    projects = find_local_projects()
+    live_projects = [p for p in projects if p.get("live_count")]
+    if not live_projects:
+        click.echo("No live agent sessions.")
+        return
+
+    for p in live_projects:
+        # Project heading.
+        click.echo()
+        click.secho(p["name"], bold=True)
+        # Live sessions only, sorted by state priority (working first,
+        # then input, then idle) so the row that most likely needs
+        # attention is at the top of each project group.
+        live = [s for s in p["sessions"] if s.get("live")]
+        state_order = {"working": 0, "input": 1, "idle": 2}
+        live.sort(key=lambda s: state_order.get(s.get("state"), 3))
+        for s in live:
+            load_session_summary(s)
+            label, colour = _STATE_LABELS.get(s.get("state"), ("[?]", "white"))
+            # Trim the date+size column from session display since the
+            # state label already telegraphs "is this recent?".
+            display = s["display"]
+            # display is "<date>  <size>  provider/<rest>" — split off the
+            # provider/ prefix and use only what comes after.
+            provider_marker = f"{s['provider']}/"
+            idx = display.find(provider_marker)
+            tail = display[idx:] if idx >= 0 else display
+            click.echo("    " + click.style(label, fg=colour) + "  " + tail)
 
 
 @cli.command("local")
