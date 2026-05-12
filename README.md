@@ -34,6 +34,8 @@ Run `cad` with no arguments.
 
 **Step 2 — sessions in the chosen project.** Each row shows date, size, provider prefix, and a title (the first user prompt, your `/rename` text, or a cad-set override). Programmatic `claude -p` sessions (from your SessionEnd hooks etc.) are hidden, matching `claude -r`'s own behavior.
 
+**Live indicator.** Sessions belonging to a currently-running claude process render a coloured dot: green = actively producing output (last JSONL write within ~10s), yellow = process alive but waiting for input. Project rows annotate with `[N live]` so the dashboard view is one keystroke deep. Detection uses `pgrep` + `lsof` + `ps`; degrades gracefully where those aren't installed.
+
 Both pickers support `/` for type-to-filter search.
 
 ## Session shortcuts

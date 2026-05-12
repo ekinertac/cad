@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from collections import defaultdict
 import webbrowser
 from datetime import datetime
@@ -361,17 +362,31 @@ def select_entry(entries, actions=None, back_action=None, initial_selected=0):
             sel = pos == state["selected"]
             arrow = "» " if sel else "  "
             entry = entries[src_i]
-            # Green-highlight rows touched (rename / summarize) in this cct
-            # run so the user can see at a glance what just changed. The
-            # cursor row uses the reverse style instead — `recent` reads
-            # naturally from the rest of the list.
-            if sel:
-                style = "class:selected"
-            elif entry.get("_recently_updated"):
-                style = "class:updated"
+            # Two-char status marker slot keeps columns aligned. Live
+            # sessions render a coloured dot (green = working, yellow =
+            # waiting); idle rows just get two spaces.
+            entry_state = entry.get("state")
+            if entry_state == "working":
+                marker, marker_style = "● ", "class:state-working"
+            elif entry_state == "waiting":
+                marker, marker_style = "● ", "class:state-waiting"
             else:
-                style = ""
-            out.append((style, f"{arrow}{entry['display']}\n"))
+                marker, marker_style = "  ", ""
+            # Green-highlight rows touched (rename / summarize) in this cad
+            # run so the user can see at a glance what just changed. The
+            # cursor row uses the reverse style instead.
+            if sel:
+                row_style = "class:selected"
+            elif entry.get("_recently_updated"):
+                row_style = "class:updated"
+            else:
+                row_style = ""
+            # Emit as three segments so the marker keeps its own colour
+            # independent of the row style (and reverse-style cursor rows
+            # still highlight the whole line).
+            out.append((row_style, arrow))
+            out.append((marker_style or row_style, marker))
+            out.append((row_style, f"{entry['display']}\n"))
         if below > 0:
             out.append(("class:hint", f"  ▼ {below} more below\n"))
         return out
@@ -513,8 +528,12 @@ def select_entry(entries, actions=None, back_action=None, initial_selected=0):
             "hint": "fg:ansibrightblack",
             "status": "fg:ansicyan",
             # Bright-green for rows just renamed/summarized — non-persistent,
-            # only highlights what changed since cct launched.
+            # only highlights what changed since cad launched.
             "updated": "fg:ansibrightgreen bold",
+            # Live-session markers: green = actively producing output,
+            # yellow = process alive but idle at the prompt.
+            "state-working": "fg:ansibrightgreen bold",
+            "state-waiting": "fg:ansiyellow",
         }
     )
     # erase_when_done removes the picker's frame from the terminal on exit
@@ -1559,6 +1578,141 @@ def _apply_cwd_override(session):
         session["cwd"] = override
 
 
+# Most claude builds set argv[0] to the version string ("2.1.138") and the
+# real binary is "claude". `pgrep -x claude` matches the basename, which is
+# the most portable signal we have. The regex extracts the resume UUID
+# from argv so we can map a process directly to a session id.
+_CLAUDE_RESUME_ARG_RE = re.compile(r"--resume\s+([0-9a-f-]{36})")
+
+
+def find_live_claude_state():
+    """Inspect running claude processes to discover which sessions are
+    live. Returns a dict::
+
+        {
+            "bound_uuids": {uuid: {"pid": int, "cwd": str}, ...},
+            "unbound_cwds": {cwd: pid_count, ...},
+        }
+
+    "Bound" means the process was started with ``--resume <uuid>`` so we
+    can map it precisely. "Unbound" means a fresh ``claude`` (no resume
+    flag); we know which project is live but not which specific JSONL —
+    the caller resolves that heuristically by binding to the most recent
+    JSONL(s) under the project's folder.
+
+    Best-effort: any subprocess error (pgrep/lsof/ps missing or denied)
+    silently returns empty state. The picker still works; it just won't
+    show live indicators.
+    """
+    empty = {"bound_uuids": {}, "unbound_cwds": {}}
+    try:
+        result = subprocess.run(
+            ["pgrep", "-x", "claude"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return empty
+    # pgrep exits 1 when no process matches — that's a clean "no live claudes"
+    if result.returncode not in (0, 1):
+        return empty
+
+    bound = {}
+    unbound = {}
+    for pid_str in result.stdout.split():
+        try:
+            pid = int(pid_str)
+        except ValueError:
+            continue
+
+        # Get cwd via lsof's `cwd` row.
+        cwd = None
+        try:
+            lsof_out = subprocess.run(
+                ["lsof", "-p", str(pid)],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            continue
+        for line in lsof_out.splitlines():
+            parts = line.split(None, 8)
+            # lsof column layout: COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME
+            # FD == "cwd" rows are the process's working directory.
+            if len(parts) >= 9 and parts[3] == "cwd":
+                cwd = parts[-1]
+                break
+        if not cwd:
+            continue
+
+        # Get argv via `ps -o args=`.
+        args = ""
+        try:
+            args = subprocess.run(
+                ["ps", "-p", str(pid), "-o", "args="],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            ).stdout.strip()
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass
+
+        match = _CLAUDE_RESUME_ARG_RE.search(args)
+        if match:
+            bound[match.group(1)] = {"pid": pid, "cwd": cwd}
+        else:
+            unbound[cwd] = unbound.get(cwd, 0) + 1
+
+    return {"bound_uuids": bound, "unbound_cwds": unbound}
+
+
+def _annotate_sessions_with_live_state(sessions, live_state, now=None):
+    """Tag each session in place with ``live`` (bool) and ``state``
+    (``working`` / ``waiting`` / ``idle``). Pure function (no I/O beyond
+    reading session["mtime"]) so it's trivially testable.
+
+    Working vs waiting is decided by JSONL mtime recency: <10s = working
+    (still streaming/tool-using), older = waiting (claude has printed its
+    response and is sitting at the prompt).
+    """
+    if now is None:
+        now = time.time()
+    bound = live_state.get("bound_uuids", {})
+    unbound = live_state.get("unbound_cwds", {})
+    WORKING_WINDOW = 10  # seconds since last JSONL write
+
+    def _state_from_mtime(s):
+        return "working" if (now - s["mtime"]) < WORKING_WINDOW else "waiting"
+
+    # Default everything to idle first.
+    for s in sessions:
+        s["live"] = False
+        s["state"] = "idle"
+
+    # Bound: each --resume uuid maps to exactly one session.
+    for s in sessions:
+        if s["provider"] == "claude" and s["session_id"] in bound:
+            s["live"] = True
+            s["state"] = _state_from_mtime(s)
+
+    # Unbound: for each cwd with N fresh claudes, bind to the N most
+    # recently-modified claude JSONLs in that cwd that aren't already
+    # bound by a --resume match.
+    by_cwd = defaultdict(list)
+    for s in sessions:
+        if s["provider"] == "claude" and not s["live"]:
+            by_cwd[s["cwd"]].append(s)
+    for cwd, n_unbound in unbound.items():
+        candidates = sorted(
+            by_cwd.get(cwd, []), key=lambda x: x["mtime"], reverse=True
+        )[:n_unbound]
+        for s in candidates:
+            s["live"] = True
+            s["state"] = _state_from_mtime(s)
+
+
 def _claude_encode_path(path):
     """Replicate Claude Code's directory-encoding scheme. Both ``/`` and
     ``.`` are replaced with ``-`` — e.g. ``/Users/x/Code/humbl.ai`` becomes
@@ -1771,6 +1925,10 @@ def find_local_projects(folder=None):
     # appears under its new project — agent files are never modified.
     for s in sessions:
         _apply_cwd_override(s)
+    # Tag claude sessions that are currently running so the picker can
+    # show a live indicator. Best-effort; degrades to all-idle if the
+    # platform doesn't have pgrep/lsof.
+    _annotate_sessions_with_live_state(sessions, find_live_claude_state())
     return _group_sessions_into_projects(sessions)
 
 
@@ -1794,6 +1952,17 @@ def _group_sessions_into_projects(sessions):
         counts = defaultdict(int)
         for s in sess:
             counts[s["provider"]] += 1
+        # Project-level live count comes from session-level annotations
+        # already applied by _annotate_sessions_with_live_state.
+        live_count = sum(1 for s in sess if s.get("live"))
+        # Project state reflects the most active session: working beats
+        # waiting beats idle. Picker uses this to colour the row marker.
+        if any(s.get("state") == "working" for s in sess):
+            project_state = "working"
+        elif any(s.get("state") == "waiting" for s in sess):
+            project_state = "waiting"
+        else:
+            project_state = "idle"
         return {
             "name": name,
             "cwd": cwd,
@@ -1801,6 +1970,8 @@ def _group_sessions_into_projects(sessions):
             "session_count": len(sess),
             "latest_mtime": sess[0]["mtime"],
             "provider_counts": dict(counts),
+            "live_count": live_count,
+            "state": project_state,
         }
 
     projects = [
@@ -1832,6 +2003,8 @@ def _group_sessions_into_projects(sessions):
             f"{p['name']:<28} {date_str}   {p['session_count']} {plural}"
             f"  ({badge_str})"
         )
+        if p.get("live_count"):
+            line = f"{line}  [{p['live_count']} live]"
         if name_counts[p["name"]] > 1 and p["cwd"] is not None:
             line = f"{line}   {p['cwd']}"
         p["display"] = line

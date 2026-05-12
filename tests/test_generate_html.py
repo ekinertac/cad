@@ -1318,6 +1318,158 @@ def _write_session(folder, name, summary="Session", cwd=None):
     return f
 
 
+class TestLiveClaudeDetection:
+    """Live-session detection: process inspection via pgrep+lsof+ps,
+    plus the pure annotation step that maps detected processes onto
+    discovered sessions."""
+
+    def test_annotate_bound_session_via_resume_uuid(self):
+        """When a claude process was started with --resume <uuid>, the
+        matching session is marked live with state derived from mtime."""
+        import cad as ct
+
+        sessions = [
+            {
+                "provider": "claude",
+                "session_id": "abc-123",
+                "cwd": "/x",
+                "mtime": 1_000.0,
+            },
+            {
+                "provider": "claude",
+                "session_id": "other",
+                "cwd": "/x",
+                "mtime": 999.0,
+            },
+        ]
+        state = {
+            "bound_uuids": {"abc-123": {"pid": 100, "cwd": "/x"}},
+            "unbound_cwds": {},
+        }
+        # 5 seconds after mtime → "working" (within 10s window).
+        ct._annotate_sessions_with_live_state(sessions, state, now=1_005.0)
+        assert sessions[0]["live"] is True
+        assert sessions[0]["state"] == "working"
+        assert sessions[1]["live"] is False
+        assert sessions[1]["state"] == "idle"
+
+    def test_waiting_state_when_mtime_is_stale(self):
+        import cad as ct
+
+        sessions = [
+            {
+                "provider": "claude",
+                "session_id": "abc-123",
+                "cwd": "/x",
+                "mtime": 1_000.0,
+            }
+        ]
+        state = {
+            "bound_uuids": {"abc-123": {"pid": 100, "cwd": "/x"}},
+            "unbound_cwds": {},
+        }
+        # 30 seconds after mtime → "waiting" (claude printed its reply
+        # and is sitting at the prompt).
+        ct._annotate_sessions_with_live_state(sessions, state, now=1_030.0)
+        assert sessions[0]["live"] is True
+        assert sessions[0]["state"] == "waiting"
+
+    def test_unbound_cwd_binds_to_most_recent_jsonls(self):
+        """A fresh `claude` (no --resume) gives us a live cwd but no
+        UUID; the annotator binds to the N most-recent JSONLs in that
+        cwd to fill in the gap."""
+        import cad as ct
+
+        # 3 sessions in the same cwd; the cwd has 2 fresh claudes.
+        sessions = [
+            {"provider": "claude", "session_id": "oldest", "cwd": "/x", "mtime": 100.0},
+            {"provider": "claude", "session_id": "middle", "cwd": "/x", "mtime": 200.0},
+            {"provider": "claude", "session_id": "newest", "cwd": "/x", "mtime": 300.0},
+        ]
+        state = {"bound_uuids": {}, "unbound_cwds": {"/x": 2}}
+        ct._annotate_sessions_with_live_state(sessions, state, now=400.0)
+        by_id = {s["session_id"]: s for s in sessions}
+        assert by_id["newest"]["live"] is True
+        assert by_id["middle"]["live"] is True
+        assert by_id["oldest"]["live"] is False
+
+    def test_non_claude_sessions_never_marked_live(self):
+        """Codex/pi/opencode/forge process detection isn't wired yet —
+        they stay idle regardless of state input."""
+        import cad as ct
+
+        sessions = [
+            {"provider": "codex", "session_id": "abc", "cwd": "/x", "mtime": 1_000.0},
+            {"provider": "pi", "session_id": "abc", "cwd": "/x", "mtime": 1_000.0},
+        ]
+        # Even if the state dict claimed these are live, the annotator
+        # only acts on claude provider sessions.
+        state = {
+            "bound_uuids": {"abc": {"pid": 1, "cwd": "/x"}},
+            "unbound_cwds": {"/x": 5},
+        }
+        ct._annotate_sessions_with_live_state(sessions, state, now=1_005.0)
+        for s in sessions:
+            assert s["live"] is False
+            assert s["state"] == "idle"
+
+    def test_find_live_claude_state_handles_missing_pgrep(self, monkeypatch):
+        """If pgrep isn't on PATH (Windows etc.), helper returns the
+        empty state without raising so the picker still works."""
+        import cad as ct
+        import subprocess
+
+        def boom(*a, **kw):
+            raise FileNotFoundError("pgrep not on PATH")
+
+        monkeypatch.setattr(subprocess, "run", boom)
+        assert ct.find_live_claude_state() == {
+            "bound_uuids": {},
+            "unbound_cwds": {},
+        }
+
+    def test_find_live_claude_state_parses_resume_uuid(self, monkeypatch):
+        """Mock the three subprocess calls so we can verify argv parsing
+        without a real claude process to inspect."""
+        import cad as ct
+        import subprocess
+
+        calls = []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+
+            class R:
+                returncode = 0
+                stdout = ""
+                stderr = ""
+
+            r = R()
+            if cmd[:2] == ["pgrep", "-x"]:
+                r.stdout = "42\n"
+            elif cmd[:2] == ["lsof", "-p"]:
+                r.stdout = (
+                    "COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME\n"
+                    "claude  42  x    cwd  DIR    1,2   64  3   /Users/x/Code/foo\n"
+                )
+            elif cmd[:2] == ["ps", "-p"]:
+                r.stdout = (
+                    "claude --dangerously-skip-permissions "
+                    "--resume deadbeef-1234-5678-9abc-deadbeef1234\n"
+                )
+            return r
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        state = ct.find_live_claude_state()
+        assert state["bound_uuids"] == {
+            "deadbeef-1234-5678-9abc-deadbeef1234": {
+                "pid": 42,
+                "cwd": "/Users/x/Code/foo",
+            }
+        }
+        assert state["unbound_cwds"] == {}
+
+
 class TestQueueOperationFilter:
     """Programmatic `claude -p` calls (from hooks etc.) produce JSONLs
     with `queue-operation` events. Claude's own `--resume` picker hides
