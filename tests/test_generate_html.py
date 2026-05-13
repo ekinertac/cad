@@ -1373,15 +1373,74 @@ class TestLiveCommand:
         monkeypatch.setattr(ct, "_annotate_sessions_with_live_state", fake_annotate)
 
         entries = ct._build_live_entries()
-        # 3 live sessions; beta-2 (not in states map) is excluded.
-        assert len(entries) == 3
-        sids = [e["session_id"] for e in entries]
+        # 3 live sessions + 2 project headers = 5 rows; beta-2 (not in
+        # the states map) is excluded.
+        session_entries = [e for e in entries if e.get("session_id")]
+        assert len(session_entries) == 3
+        sids = [e["session_id"] for e in session_entries]
         assert "beta-2" not in sids
-        # Within the alpha group (rows sharing the project name in
-        # display), working comes before idle.
-        alpha_entries = [e for e in entries if "alpha" in e["display"]]
-        assert alpha_entries[0]["state"] == "working"
-        assert alpha_entries[1]["state"] == "idle"
+        # Within the alpha group (sessions sitting after the alpha
+        # header until the next header), working comes before idle.
+        alpha_header_idx = next(
+            i
+            for i, e in enumerate(entries)
+            if e.get("header") and e["display"].strip() == "alpha"
+        )
+        alpha_run = []
+        for e in entries[alpha_header_idx + 1 :]:
+            if e.get("header"):
+                break
+            alpha_run.append(e)
+        assert alpha_run[0]["state"] == "working"
+        assert alpha_run[1]["state"] == "idle"
+
+    def test_build_live_entries_emits_project_headers(self, tmp_path, monkeypatch):
+        """Visual grouping: each project group is led by a non-selectable
+        header row (``header: True``) carrying the project name, followed
+        by its indented session rows. Projects without live sessions emit
+        no header."""
+        import cad as ct
+
+        self._setup_live_fixture(tmp_path, monkeypatch)
+
+        monkeypatch.setattr(
+            ct,
+            "find_live_claude_state",
+            lambda: {
+                "bound_uuids": {
+                    "alpha-1": {"pid": 1, "cwd": "/Users/x/Code/alpha"},
+                    "alpha-2": {"pid": 2, "cwd": "/Users/x/Code/alpha"},
+                    "beta-1": {"pid": 3, "cwd": "/Users/x/Code/beta"},
+                },
+                "unbound_cwds": {},
+            },
+        )
+
+        def fake_annotate(sessions, _state, now=None):
+            states = {"alpha-1": "working", "alpha-2": "idle", "beta-1": "input"}
+            for s in sessions:
+                s["state"] = states.get(s["session_id"], "idle")
+                s["live"] = s["session_id"] in states
+
+        monkeypatch.setattr(ct, "_annotate_sessions_with_live_state", fake_annotate)
+
+        entries = ct._build_live_entries()
+        # 2 project headers + 3 sessions = 5 rows.
+        assert len(entries) == 5
+        headers = [e for e in entries if e.get("header")]
+        assert sorted(h["display"].strip() for h in headers) == ["alpha", "beta"]
+        # The header sitting above alpha-1 should be the alpha header.
+        alpha_one_idx = next(
+            i for i, e in enumerate(entries) if e.get("session_id") == "alpha-1"
+        )
+        assert entries[alpha_one_idx - 1].get("header")
+        assert entries[alpha_one_idx - 1]["display"].strip() == "alpha"
+        # Session displays no longer carry the project name column —
+        # the header handles that.
+        for e in entries:
+            if e.get("session_id"):
+                assert "alpha " not in e["display"]
+                assert "beta " not in e["display"]
 
     def test_resume_session_refuses_when_live(self, monkeypatch):
         """Bottom-of-stack guardrail: even if a caller manages to invoke
@@ -1441,7 +1500,9 @@ class TestLiveCommand:
 
         def fake_select(entries, **kwargs):
             captured["actions"] = kwargs.get("actions")
-            return (entries[0], list(captured["actions"].values())[0])
+            # Headers are not selectable — pick the first real session.
+            first = next(e for e in entries if not e.get("header"))
+            return (first, list(captured["actions"].values())[0])
 
         peek_calls = []
         resume_calls = []
@@ -1499,8 +1560,10 @@ class TestLiveCommand:
         assert result.exit_code == 0, result.output
         assert "refresh_callback" in captured["kwargs"]
         assert captured["kwargs"]["refresh_callback"] is ct._build_live_entries
-        assert len(captured["entries"]) == 1
-        assert captured["entries"][0]["session_id"] == "alpha-1"
+        # 1 header + 1 session.
+        session_entries = [e for e in captured["entries"] if e.get("session_id")]
+        assert len(session_entries) == 1
+        assert session_entries[0]["session_id"] == "alpha-1"
 
     def test_live_command_says_so_when_nothing_is_live(self, tmp_path, monkeypatch):
         from click.testing import CliRunner

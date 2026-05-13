@@ -344,11 +344,38 @@ def select_entry(
     }
     VISIBLE = 18
 
+    def is_selectable(idx_into_indices, indices):
+        """Header rows (``header: True``) are visual separators only —
+        skip them when the cursor is moving. ``indices`` is the result
+        of ``filtered_indices()``; ``idx_into_indices`` is a position
+        within it."""
+        if idx_into_indices < 0 or idx_into_indices >= len(indices):
+            return False
+        return not entries[indices[idx_into_indices]].get("header")
+
+    def next_selectable(indices, start_pos, direction):
+        """Walk in ``direction`` (+1 / -1) from ``start_pos`` until a
+        selectable row is found or we run off either end."""
+        i = start_pos
+        n = len(indices)
+        while 0 <= i < n:
+            if is_selectable(i, indices):
+                return i
+            i += direction
+        return None
+
     def filtered_indices():
-        if not state["filter"]:
-            return list(range(len(entries)))
-        needle = state["filter"].lower()
-        return [i for i, e in enumerate(entries) if needle in e["display"].lower()]
+        # When search is active, hide headers — the result is a flat
+        # list of matches and a project label without its children would
+        # just be noise.
+        if state["filter"]:
+            needle = state["filter"].lower()
+            return [
+                i
+                for i, e in enumerate(entries)
+                if not e.get("header") and needle in e["display"].lower()
+            ]
+        return list(range(len(entries)))
 
     def viewport(indices):
         if not indices:
@@ -357,6 +384,15 @@ def select_entry(
             state["selected"] = len(indices) - 1
         if state["selected"] < 0:
             state["selected"] = 0
+        # If the cursor landed on a header (e.g. initial start, or
+        # filter just cleared), nudge to the nearest selectable row so
+        # the picker is never sitting on an unselectable line.
+        if not is_selectable(state["selected"], indices):
+            target = next_selectable(indices, state["selected"], 1)
+            if target is None:
+                target = next_selectable(indices, state["selected"], -1)
+            if target is not None:
+                state["selected"] = target
         top = max(0, state["selected"] - VISIBLE // 2)
         top = min(top, max(0, len(indices) - VISIBLE))
         visible = indices[top : top + VISIBLE]
@@ -373,8 +409,15 @@ def select_entry(
         for src_i in visible:
             pos = indices.index(src_i)
             sel = pos == state["selected"]
-            arrow = "» " if sel else "  "
             entry = entries[src_i]
+            # Header rows are visual section dividers — render flush
+            # left in a bold style with no arrow/marker columns. The
+            # cursor never lands here (see ``is_selectable``), so we
+            # don't need to consider ``sel``.
+            if entry.get("header"):
+                out.append(("class:header", f"{entry['display']}\n"))
+                continue
+            arrow = "» " if sel else "  "
             # Two-char status marker slot keeps columns aligned. Live
             # sessions render a coloured dot — green=working,
             # yellow=needs input, dim=idle.
@@ -430,23 +473,39 @@ def select_entry(
 
     @kb.add("up")
     def _(event):
-        if state["selected"] > 0:
-            state["selected"] -= 1
+        indices = filtered_indices()
+        target = next_selectable(indices, state["selected"] - 1, -1)
+        if target is not None:
+            state["selected"] = target
 
     @kb.add("down")
     def _(event):
-        if state["selected"] < len(filtered_indices()) - 1:
-            state["selected"] += 1
+        indices = filtered_indices()
+        target = next_selectable(indices, state["selected"] + 1, 1)
+        if target is not None:
+            state["selected"] = target
 
     @kb.add("pageup")
     def _(event):
-        state["selected"] = max(0, state["selected"] - VISIBLE)
+        indices = filtered_indices()
+        target = next_selectable(indices, max(0, state["selected"] - VISIBLE), -1)
+        if target is None:
+            # No selectable row at-or-before the page-up target; fall
+            # forward instead so we don't stick on a header.
+            target = next_selectable(indices, 0, 1)
+        if target is not None:
+            state["selected"] = target
 
     @kb.add("pagedown")
     def _(event):
-        state["selected"] = min(
-            len(filtered_indices()) - 1, state["selected"] + VISIBLE
+        indices = filtered_indices()
+        target = next_selectable(
+            indices, min(len(indices) - 1, state["selected"] + VISIBLE), 1
         )
+        if target is None:
+            target = next_selectable(indices, len(indices) - 1, -1)
+        if target is not None:
+            state["selected"] = target
 
     # Dynamic action bindings — one handler per configured key. Enter is
     # always live (even in search mode, where it both confirms the filter
@@ -456,6 +515,10 @@ def select_entry(
         def _handler(event):
             indices = filtered_indices()
             if not indices:
+                return
+            # Defensive: if the cursor somehow ended up on a header
+            # (shouldn't happen — viewport snaps it off), don't fire.
+            if not is_selectable(state["selected"], indices):
                 return
             state["search_mode"] = False
             state["result"] = (entries[indices[state["selected"]]], action_name)
@@ -551,6 +614,9 @@ def select_entry(
             "state-working": "fg:ansibrightgreen bold",
             "state-input": "fg:ansiyellow",
             "state-idle": "fg:ansibrightblack",
+            # Non-selectable group header rows (used by `cad live` to
+            # label each project's session block).
+            "header": "fg:ansicyan bold",
         }
     )
     # erase_when_done removes the picker's frame from the terminal on exit
@@ -3517,11 +3583,17 @@ _STATE_TEXT_LABELS = {
 
 def _build_live_entries():
     """Snapshot of every live agent session across all projects, ready
-    to feed into ``select_entry``. Sessions are grouped by project name
-    (rendered into each row's display) and ordered: working first, then
-    input, then idle, so the row most likely needing attention is at
-    the top of each project group. Outer order matches the project
+    to feed into ``select_entry``. Each project group is led by a
+    non-selectable header row (``header: True``) carrying the project
+    name; its sessions follow, indented, in state-priority order
+    (working → input → idle) so the row most likely needing attention
+    sits at the top of the group. Outer order matches the project
     picker (most-recent-activity first).
+
+    The header row is what gives ``cad live`` its visual hierarchy —
+    without it, sessions from many projects blur into one undifferentiated
+    list. ``select_entry`` knows to skip rows tagged ``header: True``
+    during cursor navigation.
     """
     projects = find_local_projects()
     entries = []
@@ -3531,6 +3603,7 @@ def _build_live_entries():
         if not live:
             continue
         live.sort(key=lambda s: state_order.get(s.get("state"), 3))
+        entries.append({"header": True, "display": p["name"]})
         for s in live:
             load_session_summary(s)
             label = _STATE_TEXT_LABELS.get(s.get("state"), "[?]      ")
@@ -3553,7 +3626,12 @@ def _build_live_entries():
                     "mtime": s["mtime"],
                     "live": s["live"],
                     "state": s["state"],
-                    "display": f"{label}  {p['name']:<28} {tail}",
+                    # No extra indent here — ``select_entry`` already
+                    # prefixes each row with a 2-char arrow column and
+                    # a 2-char state-marker column, which naturally
+                    # indents sessions 4 spaces below the flush-left
+                    # project header.
+                    "display": f"{label}  {tail}",
                 }
             )
     return entries
