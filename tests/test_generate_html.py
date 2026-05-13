@@ -295,11 +295,13 @@ class TestRenderContentBlock:
 
     def test_tool_result_with_commit(self, snapshot_html):
         """Test tool result with git commit output."""
-        # Need to set the global _github_repo for commit link rendering
-        import cad
+        # Need to set the global _github_repo for commit link rendering.
+        # After the feature-based refactor this lives in the html
+        # feature module rather than directly on cad.
+        from cad.features import html as html_feature
 
-        old_repo = cad._github_repo
-        cad._github_repo = "example/repo"
+        old_repo = html_feature._github_repo
+        html_feature._github_repo = "example/repo"
         try:
             block = {
                 "type": "tool_result",
@@ -309,7 +311,7 @@ class TestRenderContentBlock:
             result = render_content_block(block)
             assert result == snapshot_html
         finally:
-            cad._github_repo = old_repo
+            html_feature._github_repo = old_repo
 
     def test_tool_result_with_image(self, snapshot_html):
         """Test tool result containing image blocks in content array.

@@ -286,7 +286,11 @@ class TestGenerateBatchHtml:
                     raise RuntimeError("Simulated failure")
                 return original_generate_html(json_path, output_dir, github_repo)
 
-            with patch("cad.generate_html", side_effect=mock_generate_html):
+            # generate_batch_html lives in cad.features.html alongside
+            # generate_html and references it via its module namespace,
+            # so patch there (the cad-level re-export is a separate
+            # binding that doesn't affect the call site).
+            with patch("cad.features.html.generate_html", side_effect=mock_generate_html):
                 stats = generate_batch_html(projects_dir, output_dir)
 
             # Should have processed session2 successfully
