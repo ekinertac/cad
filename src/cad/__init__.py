@@ -290,6 +290,54 @@ from .features.project_rename import (  # noqa: E402,F401
     migrate_claude_project,
 )
 
+# claude-for-web API client + credentials + repo helpers moved to
+# features/web/. Re-exported so the existing test imports continue
+# to resolve at `from cad import resolve_credentials` etc.
+from .features.web import (  # noqa: E402,F401
+    ANTHROPIC_VERSION,
+    API_BASE_URL,
+    CredentialsError,
+    enrich_sessions_with_repos,
+    extract_repo_from_session,
+    fetch_session,
+    fetch_sessions,
+    filter_sessions_by_repo,
+    format_session_for_display,
+    get_access_token_from_keychain,
+    get_api_headers,
+    get_org_uuid_from_config,
+    resolve_credentials,
+)
+
+
+# detect_github_repo (used by the HTML render path on local sessions)
+# is conceptually web/HTML but currently still consumed by code
+# remaining in this file. Stays here until features/html is extracted.
+def detect_github_repo(loglines):
+    """Detect GitHub repo from git push output in tool results.
+
+    Looks for patterns like:
+    - github.com/owner/repo/pull/new/branch (from git push messages)
+
+    Returns the first detected repo (owner/name) or None.
+    """
+    for entry in loglines:
+        message = entry.get("message", {})
+        content = message.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_result":
+                result_content = block.get("content", "")
+                if isinstance(result_content, str):
+                    match = GITHUB_REPO_PATTERN.search(result_content)
+                    if match:
+                        return match.group(1)
+    return None
+
+
 def generate_batch_html(
     source_folder, output_dir, include_agents=False, progress_callback=None
 ):
@@ -431,185 +479,6 @@ def _generate_master_index(projects, output_dir):
 
     output_path = output_dir / "index.html"
     output_path.write_text(html_content, encoding="utf-8")
-
-class CredentialsError(Exception):
-    """Raised when credentials cannot be obtained."""
-
-    pass
-
-def get_access_token_from_keychain():
-    """Get access token from macOS keychain.
-
-    Returns the access token or None if not found.
-    Raises CredentialsError with helpful message on failure.
-    """
-    if platform.system() != "Darwin":
-        return None
-
-    try:
-        result = subprocess.run(
-            [
-                "security",
-                "find-generic-password",
-                "-a",
-                os.environ.get("USER", ""),
-                "-s",
-                "Claude Code-credentials",
-                "-w",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        if result.returncode != 0:
-            return None
-
-        # Parse the JSON to get the access token
-        creds = json.loads(result.stdout.strip())
-        return creds.get("claudeAiOauth", {}).get("accessToken")
-    except (json.JSONDecodeError, subprocess.SubprocessError):
-        return None
-
-def get_org_uuid_from_config():
-    """Get organization UUID from ~/.claude.json.
-
-    Returns the organization UUID or None if not found.
-    """
-    config_path = Path.home() / ".claude.json"
-    if not config_path.exists():
-        return None
-
-    try:
-        with open(config_path) as f:
-            config = json.load(f)
-        return config.get("oauthAccount", {}).get("organizationUuid")
-    except (json.JSONDecodeError, IOError):
-        return None
-
-def get_api_headers(token, org_uuid):
-    """Build API request headers."""
-    return {
-        "Authorization": f"Bearer {token}",
-        "anthropic-version": ANTHROPIC_VERSION,
-        "Content-Type": "application/json",
-        "x-organization-uuid": org_uuid,
-    }
-
-def fetch_sessions(token, org_uuid):
-    """Fetch list of sessions from the API.
-
-    Returns the sessions data as a dict.
-    Raises httpx.HTTPError on network/API errors.
-    """
-    headers = get_api_headers(token, org_uuid)
-    response = httpx.get(f"{API_BASE_URL}/sessions", headers=headers, timeout=30.0)
-    response.raise_for_status()
-    return response.json()
-
-def fetch_session(token, org_uuid, session_id):
-    """Fetch a specific session from the API.
-
-    Returns the session data as a dict.
-    Raises httpx.HTTPError on network/API errors.
-    """
-    headers = get_api_headers(token, org_uuid)
-    response = httpx.get(
-        f"{API_BASE_URL}/session_ingress/session/{session_id}",
-        headers=headers,
-        timeout=60.0,
-    )
-    response.raise_for_status()
-    return response.json()
-
-def detect_github_repo(loglines):
-    """
-    Detect GitHub repo from git push output in tool results.
-
-    Looks for patterns like:
-    - github.com/owner/repo/pull/new/branch (from git push messages)
-
-    Returns the first detected repo (owner/name) or None.
-    """
-    for entry in loglines:
-        message = entry.get("message", {})
-        content = message.get("content", [])
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            if block.get("type") == "tool_result":
-                result_content = block.get("content", "")
-                if isinstance(result_content, str):
-                    match = GITHUB_REPO_PATTERN.search(result_content)
-                    if match:
-                        return match.group(1)
-    return None
-
-def extract_repo_from_session(session):
-    """Extract GitHub repo from session metadata.
-
-    Looks in session_context.outcomes for git_info.repo,
-    or parses from session_context.sources URL.
-
-    Returns repo as "owner/name" or None.
-    """
-    context = session.get("session_context", {})
-
-    # Try outcomes first (has clean repo format)
-    outcomes = context.get("outcomes", [])
-    for outcome in outcomes:
-        if outcome.get("type") == "git_repository":
-            git_info = outcome.get("git_info", {})
-            repo = git_info.get("repo")
-            if repo:
-                return repo
-
-    # Fall back to sources URL
-    sources = context.get("sources", [])
-    for source in sources:
-        if source.get("type") == "git_repository":
-            url = source.get("url", "")
-            # Parse github.com/owner/repo from URL
-            if "github.com/" in url:
-                # Extract owner/repo from https://github.com/owner/repo
-                match = re.search(r"github\.com/([^/]+/[^/]+?)(?:\.git)?$", url)
-                if match:
-                    return match.group(1)
-
-    return None
-
-def enrich_sessions_with_repos(sessions, token=None, org_uuid=None, fetch_fn=None):
-    """Enrich sessions with repo information from session metadata.
-
-    Args:
-        sessions: List of session dicts from the API
-        token: Unused (kept for backward compatibility)
-        org_uuid: Unused (kept for backward compatibility)
-        fetch_fn: Unused (kept for backward compatibility)
-
-    Returns:
-        List of session dicts with 'repo' key added
-    """
-    enriched = []
-    for session in sessions:
-        session_copy = dict(session)
-        session_copy["repo"] = extract_repo_from_session(session)
-        enriched.append(session_copy)
-    return enriched
-
-def filter_sessions_by_repo(sessions, repo):
-    """Filter sessions by repo.
-
-    Args:
-        sessions: List of session dicts with 'repo' key
-        repo: Repo to filter by (owner/name), or None to return all
-
-    Returns:
-        Filtered list of sessions
-    """
-    if repo is None:
-        return sessions
-    return [s for s in sessions if s.get("repo") == repo]
 
 def format_json(obj):
     try:
@@ -1454,10 +1323,11 @@ def cli():
 # directory and remove the corresponding register() call.
 from .features import live as _live_feature  # noqa: E402
 from .features import shell_init as _shell_init_feature  # noqa: E402
+from .features import web as _web_feature  # noqa: E402
 
 _live_feature.register(cli)
 _shell_init_feature.register(cli)
-
+_web_feature.register(cli)
 
 @cli.command("local")
 @click.option(
@@ -1992,54 +1862,6 @@ def json_cmd(json_file, output, output_auto, repo, gist, include_json, open_brow
         index_url = (output / "index.html").resolve().as_uri()
         webbrowser.open(index_url)
 
-def resolve_credentials(token, org_uuid):
-    """Resolve token and org_uuid from arguments or auto-detect.
-
-    Returns (token, org_uuid) tuple.
-    Raises click.ClickException if credentials cannot be resolved.
-    """
-    # Get token
-    if token is None:
-        token = get_access_token_from_keychain()
-        if token is None:
-            if platform.system() == "Darwin":
-                raise click.ClickException(
-                    "Could not retrieve access token from macOS keychain. "
-                    "Make sure you are logged into Claude Code, or provide --token."
-                )
-            else:
-                raise click.ClickException(
-                    "On non-macOS platforms, you must provide --token with your access token."
-                )
-
-    # Get org UUID
-    if org_uuid is None:
-        org_uuid = get_org_uuid_from_config()
-        if org_uuid is None:
-            raise click.ClickException(
-                "Could not find organization UUID in ~/.claude.json. "
-                "Provide --org-uuid with your organization UUID."
-            )
-
-    return token, org_uuid
-
-def format_session_for_display(session_data):
-    """Format a session for display in the list or picker.
-
-    Shows repo first (if available), then date, then title.
-    Returns a formatted string.
-    """
-    title = session_data.get("title", "Untitled")
-    created_at = session_data.get("created_at", "")
-    repo = session_data.get("repo")
-    # Truncate title if too long
-    if len(title) > 50:
-        title = title[:47] + "..."
-    # Format: repo (or placeholder)  date  title
-    repo_display = repo if repo else "(no repo)"
-    date_display = created_at[:19] if created_at else "N/A"
-    return f"{repo_display:30}  {date_display:19}  {title}"
-
 def generate_html_from_session_data(session_data, output_dir, github_repo=None):
     """Generate HTML from session data dict (instead of file path)."""
     output_dir = Path(output_dir)
@@ -2207,157 +2029,6 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
     click.echo(
         f"Generated {index_path.resolve()} ({total_convs} prompts, {total_pages} pages)"
     )
-
-@cli.command("web")
-@click.argument("session_id", required=False)
-@click.option(
-    "-o",
-    "--output",
-    type=click.Path(),
-    help="Output directory. If not specified, writes to temp dir and opens in browser.",
-)
-@click.option(
-    "-a",
-    "--output-auto",
-    is_flag=True,
-    help="Auto-name output subdirectory based on session ID (uses -o as parent, or current dir).",
-)
-@click.option("--token", help="API access token (auto-detected from keychain on macOS)")
-@click.option(
-    "--org-uuid", help="Organization UUID (auto-detected from ~/.claude.json)"
-)
-@click.option(
-    "--repo",
-    help="GitHub repo (owner/name). Filters session list and sets default for commit links.",
-)
-@click.option(
-    "--gist",
-    is_flag=True,
-    help="Upload to GitHub Gist and output a gisthost.github.io URL.",
-)
-@click.option(
-    "--json",
-    "include_json",
-    is_flag=True,
-    help="Include the JSON session data in the output directory.",
-)
-@click.option(
-    "--open",
-    "open_browser",
-    is_flag=True,
-    help="Open the generated index.html in your default browser (default if no -o specified).",
-)
-def web_cmd(
-    session_id,
-    output,
-    output_auto,
-    token,
-    org_uuid,
-    repo,
-    gist,
-    include_json,
-    open_browser,
-):
-    """Select and convert a web session from the Claude API to HTML.
-
-    If SESSION_ID is not provided, displays an interactive picker to select a session.
-    """
-    try:
-        token, org_uuid = resolve_credentials(token, org_uuid)
-    except click.ClickException:
-        raise
-
-    # If no session ID provided, show interactive picker
-    if session_id is None:
-        try:
-            sessions_data = fetch_sessions(token, org_uuid)
-        except httpx.HTTPStatusError as e:
-            raise click.ClickException(
-                f"API request failed: {e.response.status_code} {e.response.text}"
-            )
-        except httpx.RequestError as e:
-            raise click.ClickException(f"Network error: {e}")
-
-        sessions = sessions_data.get("data", [])
-        if not sessions:
-            raise click.ClickException("No sessions found.")
-
-        # Enrich sessions with repo information (extracted from session metadata)
-        sessions = enrich_sessions_with_repos(sessions)
-
-        # Filter by repo if specified
-        if repo:
-            sessions = filter_sessions_by_repo(sessions, repo)
-            if not sessions:
-                raise click.ClickException(f"No sessions found for repo: {repo}")
-
-        # Build choices for questionary
-        choices = []
-        for s in sessions:
-            sid = s.get("id", "unknown")
-            display = format_session_for_display(s)
-            choices.append(questionary.Choice(title=display, value=sid))
-
-        selected = questionary.select(
-            "Select a session to import:",
-            choices=choices,
-        ).ask()
-
-        if selected is None:
-            # User cancelled
-            raise click.ClickException("No session selected.")
-
-        session_id = selected
-
-    # Fetch the session
-    click.echo(f"Fetching session {session_id}...")
-    try:
-        session_data = fetch_session(token, org_uuid, session_id)
-    except httpx.HTTPStatusError as e:
-        raise click.ClickException(
-            f"API request failed: {e.response.status_code} {e.response.text}"
-        )
-    except httpx.RequestError as e:
-        raise click.ClickException(f"Network error: {e}")
-
-    # Determine output directory and whether to open browser
-    # If no -o specified, use temp dir and open browser by default
-    auto_open = output is None and not gist and not output_auto
-    if output_auto:
-        # Use -o as parent dir (or current dir), with auto-named subdirectory
-        parent_dir = Path(output) if output else Path(".")
-        output = parent_dir / session_id
-    elif output is None:
-        output = _temp_output_dir(f"claude-session-{session_id}")
-
-    output = Path(output)
-    click.echo(f"Generating HTML in {output}/...")
-    generate_html_from_session_data(session_data, output, github_repo=repo)
-
-    # Show output directory
-    click.echo(f"Output: {output.resolve()}")
-
-    # Save JSON session data if requested
-    if include_json:
-        output.mkdir(exist_ok=True)
-        json_dest = output / f"{session_id}.json"
-        with open(json_dest, "w") as f:
-            json.dump(session_data, f, indent=2)
-        json_size_kb = json_dest.stat().st_size / 1024
-        click.echo(f"JSON: {json_dest} ({json_size_kb:.1f} KB)")
-
-    if gist:
-        # Inject gist preview JS and create gist
-        inject_gist_preview_js(output)
-        click.echo("Creating GitHub gist...")
-        gist_id, gist_url = create_gist(output)
-        preview_url = f"https://gisthost.github.io/?{gist_id}/index.html"
-        click.echo(f"Gist: {gist_url}")
-        click.echo(f"Preview: {preview_url}")
-
-    if open_browser or auto_open:
-        index_url = (output / "index.html").resolve().as_uri()
-        webbrowser.open(index_url)
 
 @cli.command("all")
 @click.option(
