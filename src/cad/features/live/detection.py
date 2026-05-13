@@ -54,14 +54,16 @@ def find_live_claude_state():
 
         {
             "bound_uuids": {uuid: {"pid": int, "cwd": str}, ...},
-            "unbound_cwds": {cwd: pid_count, ...},
+            "unbound_cwds": {cwd: [pid, pid, ...], ...},
         }
 
     "Bound" means the process was started with ``--resume <uuid>`` so we
     can map it precisely. "Unbound" means a fresh ``claude`` (no resume
-    flag); we know which project is live but not which specific JSONL —
-    the caller resolves that heuristically by binding to the most recent
-    JSONL(s) under the project's folder.
+    flag); we know the cwd has live agents but not which specific JSONL
+    each one wrote — the caller resolves that heuristically by binding
+    to the most recent JSONL(s) under the project's folder. We keep the
+    actual PIDs (not just a count) so the chosen session can carry the
+    pid forward to features like terminal-tab focus.
 
     Best-effort with a hard total time budget: any subprocess error
     (pgrep/lsof/ps missing, slow, or denied), or breaching the budget,
@@ -137,7 +139,7 @@ def find_live_claude_state():
         if match:
             bound[match.group(1)] = {"pid": pid, "cwd": cwd}
         else:
-            unbound[cwd] = unbound.get(cwd, 0) + 1
+            unbound.setdefault(cwd, []).append(pid)
 
     return {"bound_uuids": bound, "unbound_cwds": unbound}
 
@@ -186,20 +188,28 @@ def _annotate_sessions_with_live_state(sessions, live_state, now=None):
             # actual process and can't realistically re-shell pgrep.
             s["pid"] = bound[s["session_id"]].get("pid")
 
-    # Unbound: for each cwd with N fresh claudes, bind to the N most
-    # recently-modified claude JSONLs in that cwd that aren't already
-    # bound by a --resume match.
+    # Unbound: for each cwd with live claudes, bind each PID to the
+    # most recently-modified claude JSONL in that cwd that isn't
+    # already bound by a --resume match. Carrying the PID through (not
+    # just the count) is what lets features/live/focus.py find the
+    # iTerm2 tab — without it, fresh-claude sessions silently fall
+    # back to peek.
     by_cwd = defaultdict(list)
     for s in sessions:
         if s["provider"] == "claude" and not s["live"]:
             by_cwd[s["cwd"]].append(s)
-    for cwd, n_unbound in unbound.items():
+    for cwd, pids in unbound.items():
+        # Back-compat: older callers passed an int count. Promote to a
+        # list of None pids so the assignment below still terminates.
+        if isinstance(pids, int):
+            pids = [None] * pids
         candidates = sorted(
             by_cwd.get(cwd, []), key=lambda x: x["mtime"], reverse=True
-        )[:n_unbound]
-        for s in candidates:
+        )[: len(pids)]
+        for s, pid in zip(candidates, pids):
             s["live"] = True
             s["state"] = _state_from_mtime(s)
+            s["pid"] = pid
 
 
 def default_annotator(sessions):

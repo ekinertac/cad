@@ -627,6 +627,33 @@ class TestLiveClaudeDetection:
         assert by_id["middle"]["live"] is True
         assert by_id["oldest"]["live"] is False
 
+    def test_unbound_sessions_carry_pid(self):
+        """Unbound sessions (fresh ``claude`` with no ``--resume`` arg)
+        must still propagate their PID onto the session dict so
+        downstream features (terminal-tab focus) can find the tab.
+        Without this, hitting Enter on a freshly-started claude in
+        ``cad live`` silently falls back to peek because focus has no
+        pid to ``ps`` against."""
+        import cad as ct
+
+        sessions = [
+            {"provider": "claude", "session_id": "newest", "cwd": "/x", "mtime": 300.0},
+            {"provider": "claude", "session_id": "older", "cwd": "/x", "mtime": 200.0},
+        ]
+        state = {
+            "bound_uuids": {},
+            # Two live claudes in /x, with their actual pids.
+            "unbound_cwds": {"/x": [4321, 9999]},
+        }
+        ct._annotate_sessions_with_live_state(sessions, state, now=400.0)
+        by_id = {s["session_id"]: s for s in sessions}
+        # PIDs assigned in iteration order to most-recent-first sessions.
+        assert by_id["newest"]["live"] is True
+        assert by_id["newest"]["pid"] in (4321, 9999)
+        assert by_id["older"]["live"] is True
+        assert by_id["older"]["pid"] in (4321, 9999)
+        assert by_id["newest"]["pid"] != by_id["older"]["pid"]
+
     def test_non_claude_sessions_never_marked_live(self):
         """Codex/pi/opencode/forge process detection isn't wired yet —
         they stay idle regardless of state input."""
