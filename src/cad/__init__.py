@@ -287,6 +287,7 @@ def select_entry(
     refresh_callback=None,
     refresh_interval=2.0,
     page_size=18,
+    full_screen=False,
 ):
     """Interactive list picker with per-key actions and modal search.
 
@@ -608,20 +609,24 @@ def select_entry(
         vp = viewport_size() + 2
         return Dimension(min=1, preferred=vp, max=vp)
 
-    layout = Layout(
-        HSplit(
-            [
-                Window(
-                    content=FormattedTextControl(text=get_list_text),
-                    height=get_window_height,
-                    # Long lines clip at the right edge instead of wrapping
-                    # into multi-row rows that break the layout.
-                    wrap_lines=False,
-                ),
-                Window(content=FormattedTextControl(text=get_status_text), height=1),
-            ]
-        )
+    list_window = Window(
+        content=FormattedTextControl(text=get_list_text),
+        height=get_window_height,
+        # Long lines clip at the right edge instead of wrapping
+        # into multi-row rows that break the layout.
+        wrap_lines=False,
     )
+    status_window = Window(content=FormattedTextControl(text=get_status_text), height=1)
+    # In full-screen mode the picker owns the whole terminal; insert
+    # a flexible spacer between the list and the status bar so the
+    # status anchors to the bottom edge instead of floating directly
+    # under the last entry. Inline pickers keep the tight layout —
+    # there's nothing to anchor against in that case.
+    if full_screen:
+        children = [list_window, Window(), status_window]
+    else:
+        children = [list_window, status_window]
+    layout = Layout(HSplit(children))
     style = Style.from_dict(
         {
             "selected": "reverse",
@@ -644,11 +649,18 @@ def select_entry(
     # erase_when_done removes the picker's frame from the terminal on exit
     # so re-entering after a rename/summarize action doesn't leave a stack
     # of duplicate frames in the scrollback.
+    #
+    # ``full_screen`` switches prompt_toolkit to the terminal's alternate
+    # screen buffer — the picker takes over the whole window and the
+    # original shell contents are restored on exit. ``cad live`` uses this
+    # so the dashboard feels like a dedicated TUI; the inline pickers
+    # leave it off so they stay anchored in scrollback like a regular
+    # prompt.
     app = Application(
         layout=layout,
         key_bindings=kb,
         style=style,
-        full_screen=False,
+        full_screen=full_screen,
         erase_when_done=True,
     )
 
@@ -3708,6 +3720,10 @@ def live_cmd():
         # every running session at a glance, not a 18-row window of
         # them. The window grows to fit content.
         page_size=None,
+        # Take over the terminal (alternate screen buffer) — the
+        # dashboard is a dedicated TUI view, not a one-shot prompt
+        # that should print into scrollback.
+        full_screen=True,
     )
     if picked is None:
         return
