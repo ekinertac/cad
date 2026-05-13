@@ -5,6 +5,8 @@
 
 One CLI to drive every coding agent on your machine. cad discovers local sessions from **claude**, **codex**, **pi**, **opencode**, and **forge**, groups them by working directory, and gives you two views: a project-based picker for resuming / renaming / rendering past work, and a live dashboard for the agents actually running right now.
 
+> Forked from [@simonw](https://github.com/simonw)'s [claude-code-transcripts](https://github.com/simonw/claude-code-transcripts) — that's where the paginated HTML renderer (now under `cad json` / `cad all`) comes from. Thank you, Simon.
+
 ## Two modes
 
 **`cad`** — project picker → session picker. The everyday view.
@@ -168,6 +170,6 @@ uv run cad             # run the dev copy
 
 ## Credit
 
-The paginated HTML transcript renderer began as Simon Willison's [claude-code-transcripts](https://github.com/simonw/claude-code-transcripts) — that piece lives mostly intact under `cad json` / `cad all`. Everything around it (the picker, provider abstraction, overrides, peek/resume/summarize/move, `cad live`) is this project's own work.
+The paginated HTML transcript renderer began as [@simonw](https://github.com/simonw)'s [claude-code-transcripts](https://github.com/simonw/claude-code-transcripts) — that piece lives mostly intact under `cad json` / `cad all`. Everything around it (the picker, provider abstraction, overrides, peek / resume / summarize / move, `cad live`) is this project's own work.
 
 Apache 2.0.
