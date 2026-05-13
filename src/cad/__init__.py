@@ -11,6 +11,7 @@ import html
 import os
 import platform
 import re
+import contextlib
 import shutil
 import subprocess
 import sys
@@ -3620,6 +3621,26 @@ _STATE_TEXT_LABELS = {
 }
 
 
+@contextlib.contextmanager
+def _loading_message(message):
+    """Print ``message`` before a slow operation and erase the line on
+    exit. Without this, ``Loading projects...`` lingers in scrollback
+    above the picker (and above the post-exit shell prompt) — visual
+    clutter that telegraphs nothing useful once the picker is up.
+
+    Uses raw ANSI: ``\\r`` (return to col 0) then ``\\x1b[K`` (erase to
+    end of line). Same sequence every modern terminal honours, no
+    dependency on prompt_toolkit.
+    """
+    click.echo(message, nl=False)
+    sys.stdout.flush()
+    try:
+        yield
+    finally:
+        click.echo("\r\x1b[K", nl=False)
+        sys.stdout.flush()
+
+
 def _resolve_pid_tty(pid):
     """Return the /dev tty of ``pid`` (e.g. ``/dev/ttys004``) or None
     if ps can't see it. Used by ``focus_live_session`` to map a live
@@ -3800,8 +3821,8 @@ def live_cmd():
 
     Esc / q quits.
     """
-    click.echo("Loading live sessions...")
-    entries = _build_live_entries()
+    with _loading_message("Loading live sessions..."):
+        entries = _build_live_entries()
     if not entries:
         click.echo("No live agent sessions.")
         return
@@ -3900,8 +3921,8 @@ def local_cmd(
     Session summaries are loaded only after a project is picked, so the
     first picker stays cheap even with hundreds of sessions on disk.
     """
-    click.echo("Loading projects...")
-    projects = find_local_projects()
+    with _loading_message("Loading projects..."):
+        projects = find_local_projects()
 
     if not projects:
         click.echo("No local sessions found.")
