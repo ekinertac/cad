@@ -313,210 +313,31 @@ from .core.projects import (  # noqa: E402,F401
 )
 from .core.projects import find_local_projects as _find_local_projects_core
 
+# Live-mode helpers live in features/live/. Re-exported here so the
+# existing test imports (`from cad import find_live_claude_state` etc.)
+# keep resolving. The find_local_projects shim below injects the
+# live annotator at call time so core/ stays oblivious to pgrep/lsof.
+from .features.live import (  # noqa: E402,F401
+    _annotate_sessions_with_live_state,
+    _build_live_entries,
+    default_annotator as _live_default_annotator,
+    find_live_claude_state,
+    focus_live_session,
+)
+
 
 def find_local_projects(folder=None):
     """Shim: call the core grouping function with the live annotator
-    wired in. Once features/live is extracted, this shim moves there
-    too and __init__.py drops the import. Tests + everything reaching
-    `cad.find_local_projects` keep their behaviour."""
-    return _find_local_projects_core(
-        folder=folder, annotate_live=_annotate_with_live_state_default
-    )
-
-
-def _annotate_with_live_state_default(sessions):
-    """Default annotator: run the in-module live detector. Kept here
-    rather than in core because core/ knows nothing about pgrep/lsof."""
-    _annotate_sessions_with_live_state(sessions, find_live_claude_state())
+    wired in. core/projects.py knows nothing about pgrep/lsof; this
+    shim lives in __init__.py for backwards compatibility with every
+    caller doing ``from cad import find_local_projects``."""
+    return _find_local_projects_core(folder=folder, annotate_live=_live_default_annotator)
 
 
 
 
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Most claude builds set argv[0] to the version string ("2.1.138") and the
-# real binary is "claude". `pgrep -x claude` matches the basename, which is
-# the most portable signal we have. The regex extracts the resume UUID
-# from argv so we can map a process directly to a session id.
-_CLAUDE_RESUME_ARG_RE = re.compile(r"--resume\s+([0-9a-f-]{36})")
-
-
-# Total wall-clock budget for live detection. lsof can hang on a single
-# weird PID (NFS, locked fd, kernel state); a hard ceiling guarantees
-# the picker is never blocked for more than this even if one lsof call
-# stalls. Set CAD_NO_LIVE=1 in env to skip detection entirely.
-_LIVE_DETECTION_BUDGET_SEC = 2.0
-_LIVE_DETECTION_PER_CALL_SEC = 1.0
-
-
-def find_live_claude_state():
-    """Inspect running claude processes to discover which sessions are
-    live. Returns a dict::
-
-        {
-            "bound_uuids": {uuid: {"pid": int, "cwd": str}, ...},
-            "unbound_cwds": {cwd: pid_count, ...},
-        }
-
-    "Bound" means the process was started with ``--resume <uuid>`` so we
-    can map it precisely. "Unbound" means a fresh ``claude`` (no resume
-    flag); we know which project is live but not which specific JSONL —
-    the caller resolves that heuristically by binding to the most recent
-    JSONL(s) under the project's folder.
-
-    Best-effort with a hard total time budget: any subprocess error
-    (pgrep/lsof/ps missing, slow, or denied), or breaching the budget,
-    silently returns the empty state. The picker still works; it just
-    won't show live indicators. Set ``CAD_NO_LIVE=1`` to skip entirely.
-    """
-    empty = {"bound_uuids": {}, "unbound_cwds": {}}
-    if os.environ.get("CAD_NO_LIVE"):
-        return empty
-
-    deadline = time.monotonic() + _LIVE_DETECTION_BUDGET_SEC
-
-    try:
-        result = subprocess.run(
-            ["pgrep", "-x", "claude"],
-            capture_output=True,
-            text=True,
-            timeout=_LIVE_DETECTION_PER_CALL_SEC,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return empty
-    if result.returncode not in (0, 1):
-        return empty
-
-    bound = {}
-    unbound = {}
-    for pid_str in result.stdout.split():
-        if time.monotonic() > deadline:
-            # Out of budget. Return whatever we've gathered so far rather
-            # than block the picker any longer.
-            break
-        try:
-            pid = int(pid_str)
-        except ValueError:
-            continue
-
-        cwd = None
-        try:
-            # `-P -n` skips port-number and IP-to-hostname resolution.
-            # Without them lsof does blocking reverse-DNS for every open
-            # network socket — measured at 8s vs 0.03s for one claude on
-            # the developer's machine. We only care about the `cwd` row
-            # so DNS is pure overhead.
-            lsof_out = subprocess.run(
-                ["lsof", "-Pn", "-p", str(pid)],
-                capture_output=True,
-                text=True,
-                timeout=_LIVE_DETECTION_PER_CALL_SEC,
-            ).stdout
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            continue
-        for line in lsof_out.splitlines():
-            parts = line.split(None, 8)
-            # lsof column layout: COMMAND PID USER FD TYPE DEVICE SIZE NODE NAME
-            if len(parts) >= 9 and parts[3] == "cwd":
-                cwd = parts[-1]
-                break
-        if not cwd:
-            continue
-
-        args = ""
-        try:
-            args = subprocess.run(
-                ["ps", "-p", str(pid), "-o", "args="],
-                capture_output=True,
-                text=True,
-                timeout=_LIVE_DETECTION_PER_CALL_SEC,
-            ).stdout.strip()
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            pass
-
-        match = _CLAUDE_RESUME_ARG_RE.search(args)
-        if match:
-            bound[match.group(1)] = {"pid": pid, "cwd": cwd}
-        else:
-            unbound[cwd] = unbound.get(cwd, 0) + 1
-
-    return {"bound_uuids": bound, "unbound_cwds": unbound}
-
-
-def _annotate_sessions_with_live_state(sessions, live_state, now=None):
-    """Tag each session in place with ``live`` (bool) and ``state``
-    (``working`` / ``input`` / ``idle``). Pure function (no I/O beyond
-    reading session["mtime"]) so it's trivially testable.
-
-    State classification for live (process-alive) sessions by JSONL mtime:
-    - ``working`` (<10s): still streaming tokens or running a tool
-    - ``input`` (10s-5min): claude printed its turn and is at the prompt
-      waiting for the user
-    - ``idle`` (>5min): alive but stale — probably forgotten about
-
-    Non-live sessions are always ``idle``.
-    """
-    if now is None:
-        now = time.time()
-    bound = live_state.get("bound_uuids", {})
-    unbound = live_state.get("unbound_cwds", {})
-    WORKING_WINDOW = 10  # seconds — still streaming
-    INPUT_WINDOW = 300  # 5 minutes — within reach of user; older = idle
-
-    def _state_from_mtime(s):
-        age = now - s["mtime"]
-        if age < WORKING_WINDOW:
-            return "working"
-        if age < INPUT_WINDOW:
-            return "input"
-        return "idle"
-
-    # Default everything to idle first.
-    for s in sessions:
-        s["live"] = False
-        s["state"] = "idle"
-        s["pid"] = None
-
-    # Bound: each --resume uuid maps to exactly one session.
-    for s in sessions:
-        if s["provider"] == "claude" and s["session_id"] in bound:
-            s["live"] = True
-            s["state"] = _state_from_mtime(s)
-            # Carry the PID forward — downstream features (terminal
-            # focus, future kill / attach actions) need to reach the
-            # actual process and can't realistically re-shell pgrep.
-            s["pid"] = bound[s["session_id"]].get("pid")
-
-    # Unbound: for each cwd with N fresh claudes, bind to the N most
-    # recently-modified claude JSONLs in that cwd that aren't already
-    # bound by a --resume match.
-    by_cwd = defaultdict(list)
-    for s in sessions:
-        if s["provider"] == "claude" and not s["live"]:
-            by_cwd[s["cwd"]].append(s)
-    for cwd, n_unbound in unbound.items():
-        candidates = sorted(
-            by_cwd.get(cwd, []), key=lambda x: x["mtime"], reverse=True
-        )[:n_unbound]
-        for s in candidates:
-            s["live"] = True
-            s["state"] = _state_from_mtime(s)
 
 
 def _claude_encode_path(path):
@@ -1838,6 +1659,15 @@ def cli():
     pass
 
 
+# Register feature commands. Each features/<name>/__init__.py exports a
+# register(cli) hook so subcommands plug in here without __init__.py
+# having to know the internals. To remove a feature: delete its
+# directory and remove the corresponding register() call.
+from .features import live as _live_feature  # noqa: E402
+
+_live_feature.register(cli)
+
+
 @cli.command("shell-init")
 @click.argument("shell", type=click.Choice(sorted(SHELL_WRAPPERS.keys())))
 def shell_init_cmd(shell):
@@ -1855,229 +1685,12 @@ def shell_init_cmd(shell):
     click.echo(SHELL_WRAPPERS[shell], nl=False)
 
 
-# Text labels shown next to the coloured dot on each live-picker row.
-# Padded to a fixed width so columns stay aligned regardless of state.
-_STATE_TEXT_LABELS = {
-    "working": "[working]",
-    "input": "[input]  ",
-    "idle": "[idle]   ",
-}
 
 
-def _resolve_pid_tty(pid):
-    """Return the /dev tty of ``pid`` (e.g. ``/dev/ttys004``) or None
-    if ps can't see it. Used by ``focus_live_session`` to map a live
-    claude process onto a terminal tab.
-
-    A child process shares its parent shell's pty, so claude's tty is
-    the same one the terminal emulator reports for that tab —
-    matching by tty is what lets us go pid → iTerm2 session.
-    """
-    try:
-        r = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "tty="],
-            capture_output=True,
-            text=True,
-            timeout=1.0,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return None
-    if r.returncode != 0:
-        return None
-    raw = (r.stdout or "").strip()
-    if not raw or raw == "?":
-        return None
-    # ps prints the basename (ttys004), iTerm2's AppleScript reports
-    # /dev/ttys004. Normalise to the absolute form.
-    return raw if raw.startswith("/") else f"/dev/{raw}"
 
 
-# AppleScript that walks every iTerm2 window/tab/session looking for a
-# session whose tty matches ours, then selects window→tab→session so
-# the tab comes to the front. Returns "ok" on a match and "no-match"
-# otherwise so we can surface a useful boolean to the caller.
-_ITERM2_FOCUS_BY_TTY_OSASCRIPT = """
-on run argv
-    set targetTTY to item 1 of argv
-    tell application "iTerm2"
-        repeat with w in windows
-            repeat with t in tabs of w
-                repeat with s in sessions of t
-                    if tty of s is targetTTY then
-                        tell w to select
-                        tell t to select
-                        tell s to select
-                        activate
-                        return "ok"
-                    end if
-                end repeat
-            end repeat
-        end repeat
-    end tell
-    return "no-match"
-end run
-"""
 
 
-def focus_live_session(session):
-    """Bring the terminal tab running this live session to the front.
-    Returns True on success, False if we can't (unsupported terminal,
-    no PID, ps failure, no matching tab). Callers fall back to peek
-    when we return False so Enter is never a no-op.
-
-    Only iTerm2 is wired up so far. Agamon could plug in here once it
-    exposes a focus-by-tty IPC. Terminal.app, Alacritty, and plain
-    tmux-without-host-integration aren't supportable from a child
-    process without proprietary escape codes.
-    """
-    pid = session.get("pid")
-    if not pid:
-        return False
-    term_program = os.environ.get("TERM_PROGRAM", "")
-    if term_program != "iTerm.app":
-        return False
-    tty = _resolve_pid_tty(pid)
-    if not tty:
-        return False
-    try:
-        r = subprocess.run(
-            ["osascript", "-e", _ITERM2_FOCUS_BY_TTY_OSASCRIPT, tty],
-            capture_output=True,
-            text=True,
-            timeout=2.0,
-        )
-    except (subprocess.SubprocessError, OSError):
-        return False
-    if r.returncode != 0:
-        return False
-    return (r.stdout or "").strip() == "ok"
-
-
-def _build_live_entries():
-    """Snapshot of every live agent session across all projects, ready
-    to feed into ``select_entry``. Each project group is led by a
-    non-selectable header row (``header: True``) carrying the project
-    name; its sessions follow, indented, in state-priority order
-    (working → input → idle) so the row most likely needing attention
-    sits at the top of the group. Outer order matches the project
-    picker (most-recent-activity first).
-
-    The header row is what gives ``cad live`` its visual hierarchy —
-    without it, sessions from many projects blur into one undifferentiated
-    list. ``select_entry`` knows to skip rows tagged ``header: True``
-    during cursor navigation.
-    """
-    projects = find_local_projects()
-    entries = []
-    state_order = {"working": 0, "input": 1, "idle": 2}
-    for p in projects:
-        live = [s for s in p["sessions"] if s.get("live")]
-        if not live:
-            continue
-        live.sort(key=lambda s: state_order.get(s.get("state"), 3))
-        # Blank spacer row between groups so the eye separates one
-        # project from the next. The first group gets no leading
-        # spacer — it's already visually at the top.
-        if entries:
-            entries.append({"header": True, "display": ""})
-        entries.append({"header": True, "display": p["name"]})
-        for s in live:
-            load_session_summary(s)
-            label = _STATE_TEXT_LABELS.get(s.get("state"), "[?]      ")
-            # session["display"] is "<date>  <size>  provider/<rest>".
-            # Drop the date+size column — the state label already
-            # telegraphs recency, and screen real estate is precious.
-            display = s["display"]
-            provider_marker = f"{s['provider']}/"
-            idx = display.find(provider_marker)
-            tail = display[idx:] if idx >= 0 else display
-            entries.append(
-                {
-                    # Mirror the session dict shape so resume_session
-                    # and the existing select_entry rendering both work
-                    # without special-casing.
-                    "provider": s["provider"],
-                    "session_id": s["session_id"],
-                    "cwd": s["cwd"],
-                    "filepath": s["filepath"],
-                    "mtime": s["mtime"],
-                    "live": s["live"],
-                    "state": s["state"],
-                    # PID is None for unbound (cwd-matched) sessions;
-                    # the focus action knows to fall back to peek when
-                    # it's missing.
-                    "pid": s.get("pid"),
-                    # No extra indent here — ``select_entry`` already
-                    # prefixes each row with a 2-char arrow column and
-                    # a 2-char state-marker column, which naturally
-                    # indents sessions 4 spaces below the flush-left
-                    # project header.
-                    "display": f"{label}  {tail}",
-                }
-            )
-    return entries
-
-
-@cli.command("live")
-def live_cmd():
-    """Interactive dashboard of running agent sessions across all
-    projects. Refreshes every 2 seconds so working/input/idle
-    transitions surface without re-running the command.
-
-    Rows are grouped by project (project name shown inline on each
-    row) and sorted within each group by state priority — anything
-    needing attention floats up.
-
-    - ``[working]`` (green dot) — last JSONL write within 10s
-      (claude is producing output or running a tool right now).
-    - ``[input]`` (yellow dot) — alive, no recent writes within 5 min
-      (claude printed its turn; waiting on you).
-    - ``[idle]`` (dim dot) — alive but stale for 5+ min (probably
-      forgotten about).
-
-    Enter peeks the highlighted session: opens its conversation so far
-    in $PAGER (read-only, won't disturb the running agent). Resume is
-    intentionally NOT bound here — every row by definition has an
-    agent process writing to its JSONL, and spawning a second one
-    would corrupt the conversation. Switch to the original terminal
-    or close it before resuming via `cad local`.
-
-    Esc / q quits.
-    """
-    with _loading_message("Loading live sessions..."):
-        entries = _build_live_entries()
-    if not entries:
-        click.echo("No live agent sessions.")
-        return
-
-    picked = select_entry(
-        entries,
-        # Enter = "go to this session". First try to bring the
-        # terminal tab running it to the foreground (iTerm2 today,
-        # agamon/others can plug in later via ``focus_live_session``).
-        # If that's not possible, fall back to peek so Enter is never
-        # a silent no-op. Resume is NOT bound here — spawning a second
-        # agent on a live JSONL would corrupt the conversation.
-        actions={"enter": "go"},
-        refresh_callback=_build_live_entries,
-        refresh_interval=2.0,
-        # No pagination on the live dashboard — the user wants to see
-        # every running session at a glance, not a 18-row window of
-        # them. The window grows to fit content.
-        page_size=None,
-        # Take over the terminal (alternate screen buffer) — the
-        # dashboard is a dedicated TUI view, not a one-shot prompt
-        # that should print into scrollback.
-        full_screen=True,
-    )
-    if picked is None:
-        return
-    session, _ = picked
-    if focus_live_session(session):
-        return
-    # No terminal integration matched (or no PID to match against);
-    # show the user what's in the session instead of doing nothing.
-    peek_session(session)
 
 
 @cli.command("local")
