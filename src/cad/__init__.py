@@ -59,31 +59,22 @@ LONG_TEXT_THRESHOLD = (
 )
 
 
-def extract_text_from_content(content):
-    """Extract plain text from message content.
-
-    Handles both string content (older format) and array content (newer format).
-
-    Args:
-        content: Either a string or a list of content blocks like
-                 [{"type": "text", "text": "..."}, {"type": "image", ...}]
-
-    Returns:
-        The extracted text as a string, or empty string if no text found.
-    """
-    if isinstance(content, str):
-        return content.strip()
-    elif isinstance(content, list):
-        # Extract text from content blocks of type "text"
-        texts = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                text = block.get("text", "")
-                if text:
-                    texts.append(text)
-        return " ".join(texts).strip()
-    return ""
-
+# Session parsing / transcript extraction lives in core/session_model.py.
+# Re-exported for test compatibility and any callers reaching in.
+from .core.session_model import (  # noqa: E402,F401
+    _extract_role_text,
+    _extract_summarizable_text,
+    _flatten_content_blocks,
+    _get_jsonl_summary,
+    _parse_jsonl_file,
+    _read_session_excerpt_for_summary,
+    extract_text_from_content,
+    get_claude_session_metadata,
+    get_session_cwd,
+    get_session_summary,
+    get_session_transcript,
+    parse_session_file,
+)
 
 # Module-level variable for GitHub repo (set by generate_html)
 _github_repo = None
@@ -91,165 +82,6 @@ _github_repo = None
 # API constants
 API_BASE_URL = "https://api.anthropic.com/v1"
 ANTHROPIC_VERSION = "2023-06-01"
-
-
-def get_session_summary(filepath, max_length=200):
-    """Extract a human-readable summary from a session file.
-
-    Supports both JSON and JSONL formats.
-    Returns a summary string or "(no summary)" if none found.
-    """
-    filepath = Path(filepath)
-    try:
-        if filepath.suffix == ".jsonl":
-            return _get_jsonl_summary(filepath, max_length)
-        else:
-            # For JSON files, try to get first user message
-            with open(filepath, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            loglines = data.get("loglines", [])
-            for entry in loglines:
-                if entry.get("type") == "user":
-                    msg = entry.get("message", {})
-                    content = msg.get("content", "")
-                    text = extract_text_from_content(content)
-                    if text:
-                        if len(text) > max_length:
-                            return text[: max_length - 3] + "..."
-                        return text
-            return "(no summary)"
-    except Exception:
-        return "(no summary)"
-
-
-def _get_jsonl_summary(filepath, max_length=200):
-    """Extract summary from JSONL file."""
-    try:
-        with open(filepath, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    # First priority: summary type entries
-                    if obj.get("type") == "summary" and obj.get("summary"):
-                        summary = obj["summary"]
-                        if len(summary) > max_length:
-                            return summary[: max_length - 3] + "..."
-                        return summary
-                except json.JSONDecodeError:
-                    continue
-
-        # Second pass: find first non-meta user message
-        with open(filepath, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                    if (
-                        obj.get("type") == "user"
-                        and not obj.get("isMeta")
-                        and obj.get("message", {}).get("content")
-                    ):
-                        content = obj["message"]["content"]
-                        text = extract_text_from_content(content)
-                        if text and not text.startswith("<"):
-                            if len(text) > max_length:
-                                return text[: max_length - 3] + "..."
-                            return text
-                except json.JSONDecodeError:
-                    continue
-    except Exception:
-        pass
-
-    return "(no summary)"
-
-
-def get_session_cwd(jsonl_path):
-    """Return the working directory the session was started in, by scanning
-    the JSONL for the first event line that carries a ``cwd`` field. Used
-    by the resume action so we ``chdir`` to the right project before exec'ing
-    claude — far more reliable than decoding the lossy folder-name encoding
-    (where a folder like ``-Users-x-Code-cad`` could
-    decode to several different real paths).
-
-    Returns ``None`` if no event in the file has a ``cwd``. Malformed JSON
-    lines are skipped so a partially-corrupted session still yields a path.
-    """
-    try:
-        with open(jsonl_path, "r", encoding="utf-8") as fh:
-            for line in fh:
-                try:
-                    d = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(d, dict) and d.get("cwd"):
-                    return d["cwd"]
-    except OSError:
-        return None
-    return None
-
-
-def get_claude_session_metadata(filepath, max_summary_length=200):
-    """Single-pass scan of a claude JSONL that captures both the first
-    user prompt (the implicit title) and the last user-assigned name from
-    ``/rename`` (a ``{"type":"custom-title","customTitle":...}`` event).
-
-    Returns ``{"summary": str, "name": str|None}``. The summary follows
-    the same rules as :func:`_get_jsonl_summary` — ``type:summary`` events
-    win, otherwise the first non-meta user message. The name is whichever
-    custom-title event came last in the file: rename can happen multiple
-    times in one session and ``claude --resume <name>`` resolves to the
-    current value.
-
-    A single pass is cheaper than running two scans, but only invoked
-    after the user picks a project — the project-picker layer doesn't
-    need names or summaries.
-    """
-    summary = None
-    name = None
-    try:
-        with open(filepath, "r", encoding="utf-8") as fh:
-            for line in fh:
-                try:
-                    d = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(d, dict):
-                    continue
-                t = d.get("type")
-                if t == "custom-title":
-                    new_name = d.get("customTitle")
-                    if new_name:
-                        name = new_name
-                    continue
-                if summary is not None:
-                    # Once we have a summary we don't need to inspect more
-                    # for that purpose, but keep walking in case a later
-                    # custom-title event updates the name.
-                    continue
-                if t == "summary" and d.get("summary"):
-                    summary = d["summary"]
-                elif (
-                    t == "user"
-                    and not d.get("isMeta")
-                    and d.get("message", {}).get("content")
-                ):
-                    text = extract_text_from_content(d["message"]["content"])
-                    if text and not text.startswith("<"):
-                        summary = text
-    except OSError:
-        pass
-
-    if summary is None:
-        summary = "(no summary)"
-    elif len(summary) > max_summary_length:
-        summary = summary[: max_summary_length - 3] + "..."
-
-    return {"summary": summary, "name": name}
 
 
 def find_local_sessions(folder, limit=10):
@@ -722,103 +554,15 @@ def select_session_action(sessions):
     return select_entry(sessions, actions={"enter": "resume", "h": "html"})
 
 
-PROVIDER_RESUME_COMMANDS = {
-    # The agent CLI to exec for each provider, plus the static flags. The
-    # session id is appended at call time. Skip-permissions on claude is
-    # intentional — long sessions devolve into rubber-stamping prompts.
-    "claude": ["claude", "--dangerously-skip-permissions", "--resume"],
-    "codex": ["codex", "resume"],
-    "pi": ["pi", "--session"],
-    "opencode": ["opencode", "--session"],
-    "forge": ["forge", "--conversation-id"],
-}
-
-
-def resume_session(session):
-    """Replace this process with the appropriate provider's resume command
-    after chdir'ing to the cwd recorded in the session. Never returns on
-    success.
-
-    A child process can't change its parent shell's working directory; the
-    optional shell wrapper installed via ``cad shell-init`` reads
-    ``$CAD_CWD_FILE`` after the agent exits and cd's the parent shell.
-
-    Guardrail: refuses to resume a session that's already live in another
-    terminal. Spawning a second agent process on the same JSONL would
-    cause interleaved writes and scramble the conversation order. The
-    user must close the other terminal (or use peek) instead.
-    """
-    if session.get("live"):
-        click.echo(
-            "Refusing to resume: this session is currently active in "
-            "another terminal. Spawning a second agent on the same "
-            "session file would corrupt it. Close that terminal first, "
-            "or use peek (`p` in the picker) to view it read-only.",
-            err=True,
-        )
-        return
-
-    provider = session["provider"]
-    cwd = session["cwd"]
-    session_id = session["session_id"]
-
-    if provider not in PROVIDER_RESUME_COMMANDS:
-        click.echo(f"Unknown provider: {provider}", err=True)
-        sys.exit(1)
-    if not Path(cwd).is_dir():
-        click.echo(f"Original project directory no longer exists: {cwd}", err=True)
-        sys.exit(1)
-
-    click.echo(f"Resuming {provider} session {session_id} in {cwd}...")
-
-    cwd_file = os.environ.get("CAD_CWD_FILE")
-    if cwd_file:
-        try:
-            Path(cwd_file).write_text(cwd)
-        except OSError:
-            pass
-
-    os.chdir(cwd)
-    cmd = PROVIDER_RESUME_COMMANDS[provider] + [session_id]
-    os.execvp(cmd[0], cmd)
-
-
-# Commands for starting a fresh session (no resume id). Currently
-# claude-only — other agents would slot in here when there's demand.
-PROVIDER_NEW_COMMANDS = {
-    "claude": ["claude", "--dangerously-skip-permissions"],
-}
-
-
-def new_session(cwd, provider="claude"):
-    """Replace this process with the agent CLI in ``cwd``, starting a
-    fresh session (no ``--resume``). Same chdir / CAD_CWD_FILE / execvp
-    plumbing as :func:`resume_session` so the shell wrapper also picks
-    up the new cwd post-exit.
-    """
-    if provider not in PROVIDER_NEW_COMMANDS:
-        click.echo(
-            f"Starting a new session isn't wired for {provider} yet — "
-            f"cd into the project and run the agent manually.",
-            err=True,
-        )
-        return
-    if not Path(cwd).is_dir():
-        click.echo(f"Project directory does not exist: {cwd}", err=True)
-        return
-
-    click.echo(f"Starting new {provider} session in {cwd}...")
-
-    cwd_file = os.environ.get("CAD_CWD_FILE")
-    if cwd_file:
-        try:
-            Path(cwd_file).write_text(cwd)
-        except OSError:
-            pass
-
-    os.chdir(cwd)
-    cmd = PROVIDER_NEW_COMMANDS[provider]
-    os.execvp(cmd[0], cmd)
+# Provider abstraction lives in core/providers.py — re-exported so legacy
+# imports (`from cad import resume_session` etc.) still resolve.
+from .core.providers import (  # noqa: E402,F401
+    PROVIDER_BADGES,
+    PROVIDER_NEW_COMMANDS,
+    PROVIDER_RESUME_COMMANDS,
+    new_session,
+    resume_session,
+)
 
 
 # `command cad` in the wrapper skips this function so the binary runs once.
@@ -910,97 +654,6 @@ def prompt_for_cwd(default="", must_exist=True, label="New cwd"):
         current = text
 
 
-def _flatten_content_blocks(content):
-    """Normalise an agent message's `content` field to a single text string.
-    Handles flat-string content, content-block-array content (claude/pi),
-    and anything else by returning empty.
-    """
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        parts = []
-        for b in content:
-            if isinstance(b, dict) and b.get("type") == "text":
-                parts.append(b.get("text", ""))
-        return " ".join(parts).strip()
-    return ""
-
-
-def _extract_role_text(event, provider):
-    """For one JSONL event, return ``(role, text)`` if it's a user or
-    assistant message and the text is non-empty; otherwise ``("", "")``.
-    Tool calls / tool results / system meta are intentionally skipped —
-    peek mode is "what did the human and the agent say to each other?"
-    """
-    if not isinstance(event, dict):
-        return "", ""
-    if provider == "claude":
-        msg = event.get("message")
-        if not isinstance(msg, dict):
-            return "", ""
-        role = msg.get("role") or event.get("type")
-        if role not in ("user", "assistant"):
-            return "", ""
-        if event.get("isMeta"):  # claude marks injected system notes
-            return "", ""
-        return role, _flatten_content_blocks(msg.get("content"))
-    if provider == "codex":
-        if event.get("type") != "event_msg":
-            return "", ""
-        p = event.get("payload") or {}
-        ptype = p.get("type")
-        if ptype == "user_message":
-            return "user", (p.get("message") or "").strip()
-        if ptype == "agent_message":
-            return "assistant", (p.get("message") or "").strip()
-        return "", ""
-    if provider == "pi":
-        if event.get("type") != "message":
-            return "", ""
-        msg = event.get("message") or {}
-        role = msg.get("role")
-        if role not in ("user", "assistant"):
-            return "", ""
-        return role, _flatten_content_blocks(msg.get("content"))
-    return "", ""
-
-
-def get_session_transcript(session, max_chars=200_000):
-    """Return a list of ``(role, text)`` tuples for peek mode — user
-    prompts and assistant text replies only, no tool calls.
-
-    Caps total characters so an enormous session doesn't make the pager
-    take ages to load. SQLite-backed providers (opencode, forge) aren't
-    yet supported and return an empty list — peek prints a friendly
-    message in that case.
-    """
-    provider = session["provider"]
-    if provider not in ("claude", "codex", "pi"):
-        return []
-    out = []
-    total = 0
-    try:
-        with open(session["filepath"], "r", encoding="utf-8") as fh:
-            for line in fh:
-                try:
-                    d = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                role, text = _extract_role_text(d, provider)
-                if not text:
-                    continue
-                out.append((role, text))
-                total += len(text)
-                if total >= max_chars:
-                    out.append(("system", "[... truncated by cct peek]"))
-                    break
-    except OSError:
-        pass
-    return out
-
-
 def peek_session(session):
     """Render the session's prompts/replies to a temp markdown file and
     open it in ``$PAGER`` (fallback ``less``). Blocks until the user
@@ -1048,65 +701,6 @@ def peek_session(session):
             os.unlink(path)
         except OSError:
             pass
-
-
-def _read_session_excerpt_for_summary(session, max_chars=2000):
-    """Pull a reasonable excerpt from a session for the summarize prompt.
-
-    For JSONL providers, walk the first ~max_chars of textual content
-    (user prompts + assistant replies). For SQLite providers (opencode,
-    forge), we already store a title at discovery time so summarize is
-    mostly redundant — but we still fall back to whatever summary we have
-    so the LLM has something to reword. Returns a single string.
-    """
-    provider = session["provider"]
-    parts = []
-    if provider in ("claude", "codex", "pi"):
-        try:
-            with open(session["filepath"], "r", encoding="utf-8") as fh:
-                for line in fh:
-                    try:
-                        d = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    text = _extract_summarizable_text(d)
-                    if text:
-                        parts.append(text)
-                        if sum(len(p) for p in parts) >= max_chars:
-                            break
-        except OSError:
-            pass
-    if not parts and session.get("summary"):
-        parts.append(session["summary"])
-    excerpt = "\n\n".join(parts)
-    return excerpt[:max_chars]
-
-
-def _extract_summarizable_text(event):
-    """Best-effort text extractor for one JSONL event across providers.
-    Returns a string or '' if nothing useful."""
-    if not isinstance(event, dict):
-        return ""
-    # Claude shape: {"type":"user|assistant", "message":{"content": ...}}
-    msg = event.get("message")
-    if isinstance(msg, dict):
-        content = msg.get("content")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            chunks = []
-            for b in content:
-                if isinstance(b, dict) and b.get("type") == "text":
-                    chunks.append(b.get("text", ""))
-                elif isinstance(b, str):
-                    chunks.append(b)
-            return " ".join(chunks).strip()
-    # Codex shape: event_msg with payload.message
-    payload = event.get("payload")
-    if isinstance(payload, dict):
-        if payload.get("type") in ("user_message", "agent_message"):
-            return (payload.get("message") or "").strip()
-    return ""
 
 
 def summarize_session(session):
@@ -2047,17 +1641,6 @@ def load_session_summary(session):
     session["display"] = f"{date_str}  {size_kb:5.0f} KB  {prefix}{summary_one_line}"
 
 
-# Single-letter badge codes for the project-row provider counts. Adding a
-# new provider here is the only place the badge layer cares about names.
-PROVIDER_BADGES = {
-    "claude": "c",
-    "codex": "x",
-    "pi": "p",
-    "opencode": "o",
-    "forge": "f",
-}
-
-
 def find_local_projects(folder=None):
     """Discover all sessions across providers and group them by ``cwd`` into
     project dicts for the two-step picker.
@@ -2446,57 +2029,6 @@ def _generate_master_index(projects, output_dir):
 
     output_path = output_dir / "index.html"
     output_path.write_text(html_content, encoding="utf-8")
-
-
-def parse_session_file(filepath):
-    """Parse a session file and return normalized data.
-
-    Supports both JSON and JSONL formats.
-    Returns a dict with 'loglines' key containing the normalized entries.
-    """
-    filepath = Path(filepath)
-
-    if filepath.suffix == ".jsonl":
-        return _parse_jsonl_file(filepath)
-    else:
-        # Standard JSON format
-        with open(filepath, "r", encoding="utf-8") as f:
-            return json.load(f)
-
-
-def _parse_jsonl_file(filepath):
-    """Parse JSONL file and convert to standard format."""
-    loglines = []
-
-    with open(filepath, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                obj = json.loads(line)
-                entry_type = obj.get("type")
-
-                # Skip non-message entries
-                if entry_type not in ("user", "assistant"):
-                    continue
-
-                # Convert to standard format
-                entry = {
-                    "type": entry_type,
-                    "timestamp": obj.get("timestamp", ""),
-                    "message": obj.get("message", {}),
-                }
-
-                # Preserve isCompactSummary if present
-                if obj.get("isCompactSummary"):
-                    entry["isCompactSummary"] = True
-
-                loglines.append(entry)
-            except json.JSONDecodeError:
-                continue
-
-    return {"loglines": loglines}
 
 
 class CredentialsError(Exception):
