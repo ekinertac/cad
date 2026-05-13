@@ -1197,39 +1197,17 @@ cad() {
 }
 
 
-TEMP_OUTPUT_PARENT = "cad"
-TEMP_OUTPUT_KEEP = 20
-
-
-def _temp_output_dir(stem):
-    """Return a per-session temp output dir under a single shared parent
-    (``$TMPDIR/cad/``). Old sibling dirs beyond
-    :data:`TEMP_OUTPUT_KEEP` are pruned so the user's tmp folder doesn't
-    accumulate transcripts indefinitely between system-level temp cleanups.
-    """
-    parent = Path(tempfile.gettempdir()) / TEMP_OUTPUT_PARENT
-    parent.mkdir(parents=True, exist_ok=True)
-    _prune_temp_outputs(parent, keep=TEMP_OUTPUT_KEEP)
-    return parent / stem
-
-
-def _prune_temp_outputs(parent, keep):
-    """Delete all but the ``keep`` most-recently-modified subdirectories of
-    ``parent``. Best-effort: tolerates missing parents and unreadable
-    entries so a cleanup hiccup never blocks the user's render.
-    """
-    try:
-        children = [c for c in parent.iterdir() if c.is_dir()]
-    except (OSError, FileNotFoundError):
-        return
-    if len(children) <= keep:
-        return
-    children.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    for old in children[keep:]:
-        try:
-            shutil.rmtree(old)
-        except OSError:
-            pass
+# Temp output constants + helpers live in core/util.py now. Re-export
+# the module-level names for any legacy callers (and tests) that import
+# them from the top-level cad namespace.
+from .core.util import (  # noqa: E402,F401
+    TEMP_OUTPUT_KEEP,
+    TEMP_OUTPUT_PARENT,
+    _atomic_write_json,
+    _loading_message,
+    _prune_temp_outputs,
+    _temp_output_dir,
+)
 
 
 def _global_session_cwds():
@@ -1670,32 +1648,6 @@ def _load_titles():
         return json.loads(f.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-
-
-def _atomic_write_json(path, data):
-    """Write ``data`` to ``path`` as JSON without risking a half-written
-    file. Steps:
-
-    1. Copy the existing file (if any) to ``<path>.bak`` — one-step undo
-       if the user later realises they made a mistake.
-    2. Write to ``<path>.tmp`` next to the target.
-    3. ``os.replace`` the temp file onto the target — POSIX atomic; the
-       file is either fully old or fully new, never partial.
-
-    If a crash happens between (1) and (3), the user still has a valid
-    ``<path>`` (the previous version) plus a ``.bak`` of the same.
-    """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists():
-        try:
-            shutil.copy2(path, path.with_suffix(path.suffix + ".bak"))
-        except OSError:
-            # Best effort — don't block a save because backup failed.
-            pass
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, path)
 
 
 def save_title_override(provider, session_id, title):
@@ -3619,26 +3571,6 @@ _STATE_TEXT_LABELS = {
     "input": "[input]  ",
     "idle": "[idle]   ",
 }
-
-
-@contextlib.contextmanager
-def _loading_message(message):
-    """Print ``message`` before a slow operation and erase the line on
-    exit. Without this, ``Loading projects...`` lingers in scrollback
-    above the picker (and above the post-exit shell prompt) — visual
-    clutter that telegraphs nothing useful once the picker is up.
-
-    Uses raw ANSI: ``\\r`` (return to col 0) then ``\\x1b[K`` (erase to
-    end of line). Same sequence every modern terminal honours, no
-    dependency on prompt_toolkit.
-    """
-    click.echo(message, nl=False)
-    sys.stdout.flush()
-    try:
-        yield
-    finally:
-        click.echo("\r\x1b[K", nl=False)
-        sys.stdout.flush()
 
 
 def _resolve_pid_tty(pid):
