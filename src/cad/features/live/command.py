@@ -47,14 +47,19 @@ def live_cmd():
     - ``[idle]`` (dim dot) — alive but stale for 5+ min (probably
       forgotten about).
 
-    Enter peeks the highlighted session: opens its conversation so far
-    in $PAGER (read-only, won't disturb the running agent). Resume is
-    intentionally NOT bound here — every row by definition has an
-    agent process writing to its JSONL, and spawning a second one
-    would corrupt the conversation. Switch to the original terminal
-    or close it before resuming via `cad local`.
+    Enter brings the terminal tab running the highlighted session to
+    the front (iTerm2 today; falls back to peeking the conversation
+    in $PAGER for unsupported terminals). The dashboard stays open
+    in its original tab so you can switch back and pick another
+    session — `cad live` is a persistent monitoring view, not a
+    one-shot launcher.
 
-    Esc / q quits.
+    Resume is intentionally NOT bound here — every row by definition
+    has an agent process writing to its JSONL, and spawning a second
+    one would corrupt the conversation. Switch to the original
+    terminal or close it before resuming via `cad local`.
+
+    Esc / q quits the dashboard.
     """
     # Indirect through cad.* so test monkeypatches on the top-level
     # module hit the right targets even though the canonical
@@ -65,35 +70,51 @@ def live_cmd():
 
     with _loading_message("Loading live sessions..."):
         entries = build_entries()
-    if not entries:
-        click.echo("No live agent sessions.")
-        return
 
-    picked = select_entry(
-        entries,
-        # Enter = "go to this session". First try to bring the
-        # terminal tab running it to the foreground (iTerm2 today,
-        # agamon/others can plug in later via ``focus_live_session``).
-        # If that's not possible, fall back to peek so Enter is never
-        # a silent no-op. Resume is NOT bound here — spawning a second
-        # agent on a live JSONL would corrupt the conversation.
-        actions={"enter": "go"},
-        refresh_callback=build_entries,
-        refresh_interval=2.0,
-        # No pagination on the live dashboard — the user wants to see
-        # every running session at a glance, not a 18-row window of
-        # them. The window grows to fit content.
-        page_size=None,
-        # Take over the terminal (alternate screen buffer) — the
-        # dashboard is a dedicated TUI view, not a one-shot prompt
-        # that should print into scrollback.
-        full_screen=True,
-    )
-    if picked is None:
-        return
-    session, _ = picked
-    if focus_live_session(session):
-        return
-    # No terminal integration matched (or no PID to match against);
-    # show the user what's in the session instead of doing nothing.
-    _peek(session)
+    # Outer loop turns the dashboard into a persistent monitoring
+    # view. After Enter on a row, we focus (or peek) and then drop
+    # back into the picker rather than exiting. The user explicitly
+    # quits with q / Esc / Ctrl-C, which returns ``None`` from
+    # select_entry and breaks the loop. Rebuilding entries between
+    # iterations means any sessions that ended or appeared while the
+    # user was away in another tab show up on re-entry.
+    while True:
+        if not entries:
+            click.echo("No live agent sessions.")
+            return
+
+        picked = select_entry(
+            entries,
+            # Enter = "go to this session". First try to bring the
+            # terminal tab running it to the foreground (iTerm2 today,
+            # agamon/others can plug in later via ``focus_live_session``).
+            # If that's not possible, fall back to peek so Enter is
+            # never a silent no-op. Resume is NOT bound here —
+            # spawning a second agent on a live JSONL would corrupt
+            # the conversation.
+            actions={"enter": "go"},
+            refresh_callback=build_entries,
+            refresh_interval=2.0,
+            # No pagination on the live dashboard — the user wants
+            # to see every running session at a glance, not a 18-row
+            # window of them. The window grows to fit content.
+            page_size=None,
+            # Take over the terminal (alternate screen buffer) — the
+            # dashboard is a dedicated TUI view, not a one-shot
+            # prompt that should print into scrollback.
+            full_screen=True,
+        )
+        if picked is None:
+            # q / Esc / Ctrl-C — leave the dashboard.
+            return
+        session, _ = picked
+        if not focus_live_session(session):
+            # No terminal integration matched (or no PID to match
+            # against); show the user what's in the session instead
+            # of doing nothing.
+            _peek(session)
+        # Rebuild before re-entering so the picker reflects whatever
+        # changed while the user was away. The refresh thread would
+        # also pick this up within 2s, but rebuilding immediately
+        # avoids a stale first frame.
+        entries = build_entries()

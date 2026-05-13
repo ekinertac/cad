@@ -308,10 +308,18 @@ class TestLiveCommand:
 
         monkeypatch.setattr(ct, "_annotate_sessions_with_live_state", fake_annotate)
 
-        captured = {}
+        captured = {"calls": 0}
 
         def fake_select(entries, **kwargs):
+            # `cad live` now loops the picker — it stays open after
+            # each Enter so the user can keep using it as a dashboard.
+            # Simulate: pick on the first invocation, then quit (None)
+            # on the second so the command terminates and the test
+            # doesn't hang.
             captured["actions"] = kwargs.get("actions")
+            captured["calls"] += 1
+            if captured["calls"] > 1:
+                return None
             first = next(e for e in entries if not e.get("header"))
             return (first, list(captured["actions"].values())[0])
 
@@ -351,6 +359,30 @@ class TestLiveCommand:
         assert focus_log == ["alpha-1"]
         assert peek_calls == []  # didn't fall back
         assert resume_calls == []
+
+    def test_live_command_stays_open_after_enter(self, tmp_path, monkeypatch):
+        """`cad live` is a monitoring view, not a launcher: after
+        Enter (whether focus succeeds or peek runs as fallback) the
+        picker must re-open so the user can switch to another session
+        without re-running the command. Verified by the picker being
+        invoked twice — first pick returns a session, second returns
+        None to terminate. If the loop were missing, the second call
+        would never happen."""
+        from click.testing import CliRunner
+        from cad import cli
+        import cad as ct
+
+        captured, peek_calls, _ = self._wire_one_live_session(tmp_path, monkeypatch)
+        monkeypatch.setattr(ct, "focus_live_session", lambda s: True)
+
+        result = CliRunner().invoke(cli, ["live"])
+        assert result.exit_code == 0, result.output
+        # First call returned the session; second returned None and
+        # broke the loop. Anything less than 2 means we exited after
+        # the first Enter, which is the bug we're guarding against.
+        assert captured["calls"] == 2
+        # Focus handled it both times — peek shouldn't have run.
+        assert peek_calls == []
 
     def test_live_command_enter_falls_back_to_peek_when_focus_fails(
         self, tmp_path, monkeypatch
