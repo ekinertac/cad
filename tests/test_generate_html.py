@@ -1471,12 +1471,11 @@ class TestLiveCommand:
         assert called["execvp"] is False
         assert called["chdir"] is False
 
-    def test_live_command_enter_invokes_peek_not_resume(self, tmp_path, monkeypatch):
-        """`cad live`'s Enter must NOT resume — every row by definition
-        is live and resuming would corrupt the session. It should peek
-        instead (read-only snapshot)."""
-        from click.testing import CliRunner
-        from cad import cli
+    def _wire_one_live_session(self, tmp_path, monkeypatch):
+        """Common scaffolding for the Enter-behavior tests: one live
+        session named alpha-1, picker stubbed to return its first
+        non-header entry. Returns the captured-actions dict and the
+        peek/resume call logs."""
         import cad as ct
 
         self._setup_live_fixture(tmp_path, monkeypatch)
@@ -1493,6 +1492,8 @@ class TestLiveCommand:
             for s in sessions:
                 s["live"] = s["session_id"] == "alpha-1"
                 s["state"] = "working" if s["live"] else "idle"
+                if s["live"]:
+                    s["pid"] = 4242
 
         monkeypatch.setattr(ct, "_annotate_sessions_with_live_state", fake_annotate)
 
@@ -1500,7 +1501,6 @@ class TestLiveCommand:
 
         def fake_select(entries, **kwargs):
             captured["actions"] = kwargs.get("actions")
-            # Headers are not selectable — pick the first real session.
             first = next(e for e in entries if not e.get("header"))
             return (first, list(captured["actions"].values())[0])
 
@@ -1513,10 +1513,50 @@ class TestLiveCommand:
         monkeypatch.setattr(
             ct, "resume_session", lambda s: resume_calls.append(s["session_id"])
         )
+        return captured, peek_calls, resume_calls
+
+    def test_live_command_enter_focuses_then_peeks(self, tmp_path, monkeypatch):
+        """`cad live`'s Enter tries to bring the terminal tab running
+        the session to the front. When focus succeeds we DON'T also
+        peek — the user is now in the actual session. Resume is never
+        called (two agents on one JSONL would corrupt it)."""
+        from click.testing import CliRunner
+        from cad import cli
+        import cad as ct
+
+        captured, peek_calls, resume_calls = self._wire_one_live_session(
+            tmp_path, monkeypatch
+        )
+        focus_log = []
+
+        def fake_focus(s):
+            focus_log.append(s.get("session_id"))
+            return True  # iTerm2 matched and switched
+
+        monkeypatch.setattr(ct, "focus_live_session", fake_focus)
 
         result = CliRunner().invoke(cli, ["live"])
         assert result.exit_code == 0, result.output
-        assert captured["actions"] == {"enter": "peek"}
+        assert focus_log == ["alpha-1"]
+        assert peek_calls == []  # didn't fall back
+        assert resume_calls == []
+
+    def test_live_command_enter_falls_back_to_peek_when_focus_fails(
+        self, tmp_path, monkeypatch
+    ):
+        """When focus can't find the tab (unsupported terminal, no PID,
+        no match), peek the session so Enter is never a silent no-op."""
+        from click.testing import CliRunner
+        from cad import cli
+        import cad as ct
+
+        captured, peek_calls, resume_calls = self._wire_one_live_session(
+            tmp_path, monkeypatch
+        )
+        monkeypatch.setattr(ct, "focus_live_session", lambda s: False)
+
+        result = CliRunner().invoke(cli, ["live"])
+        assert result.exit_code == 0, result.output
         assert peek_calls == ["alpha-1"]
         assert resume_calls == []
 
@@ -1589,6 +1629,85 @@ class TestLiveCommand:
         assert "No live agent sessions" in result.output
 
 
+class TestFocusLiveSession:
+    """`focus_live_session` switches the terminal to whichever tab is
+    running the live claude process. Right now only iTerm2 is supported;
+    other terminals return False so the caller can fall back to peek."""
+
+    def test_returns_false_when_session_has_no_pid(self, monkeypatch):
+        """Unbound (cwd-matched) sessions have no specific PID, so we
+        can't identify which tty they're on. Caller must fall back."""
+        import cad as ct
+
+        monkeypatch.setenv("TERM_PROGRAM", "iTerm.app")
+        assert ct.focus_live_session({"pid": None}) is False
+
+    def test_returns_false_outside_iterm2(self, monkeypatch):
+        """No supported terminal integration → caller falls back."""
+        import cad as ct
+
+        monkeypatch.setenv("TERM_PROGRAM", "Apple_Terminal")
+        assert ct.focus_live_session({"pid": 1234}) is False
+
+    def test_returns_false_when_term_program_unset(self, monkeypatch):
+        """Headless / ssh / cron contexts have no TERM_PROGRAM."""
+        import cad as ct
+
+        monkeypatch.delenv("TERM_PROGRAM", raising=False)
+        assert ct.focus_live_session({"pid": 1234}) is False
+
+    def test_iterm2_runs_osascript_with_resolved_tty(self, monkeypatch):
+        """iTerm2 path: resolve PID→tty via ps, then run an osascript
+        that selects the iTerm2 session whose tty property matches.
+        The actual AppleScript text isn't asserted (it can evolve); we
+        just verify the tty is in the script and osascript was invoked."""
+        import cad as ct
+
+        monkeypatch.setenv("TERM_PROGRAM", "iTerm.app")
+        ran = {}
+
+        def fake_run(cmd, *args, **kwargs):
+            class R:
+                returncode = 0
+                stdout = ""
+
+            if cmd[:2] == ["ps", "-p"]:
+                R.stdout = "ttys004\n"
+                return R()
+            if cmd and cmd[0] == "osascript":
+                ran["cmd"] = cmd
+                # AppleScript returns "ok" when it found and focused
+                # the matching session.
+                R.stdout = "ok\n"
+                return R()
+            return R()
+
+        monkeypatch.setattr(ct.subprocess, "run", fake_run)
+        assert ct.focus_live_session({"pid": 4242}) is True
+        assert ran["cmd"][0] == "osascript"
+        # The script is passed via -e; whatever shape it takes, the
+        # tty must appear so iTerm2 has something to match against.
+        script_text = " ".join(ran["cmd"])
+        assert "/dev/ttys004" in script_text
+
+    def test_iterm2_returns_false_when_tty_lookup_fails(self, monkeypatch):
+        """If ps can't tell us the tty (process gone, weird system),
+        skip the AppleScript dance — there's nothing to match on."""
+        import cad as ct
+
+        monkeypatch.setenv("TERM_PROGRAM", "iTerm.app")
+
+        def fake_run(cmd, *args, **kwargs):
+            class R:
+                returncode = 1
+                stdout = ""
+
+            return R()
+
+        monkeypatch.setattr(ct.subprocess, "run", fake_run)
+        assert ct.focus_live_session({"pid": 4242}) is False
+
+
 class TestLiveClaudeDetection:
     """Live-session detection: process inspection via pgrep+lsof+ps,
     plus the pure annotation step that maps detected processes onto
@@ -1621,8 +1740,13 @@ class TestLiveClaudeDetection:
         ct._annotate_sessions_with_live_state(sessions, state, now=1_005.0)
         assert sessions[0]["live"] is True
         assert sessions[0]["state"] == "working"
+        # The PID of the bound claude process must travel with the
+        # session so downstream features (terminal-tab focus, kill,
+        # etc.) can act on it without re-shelling out to pgrep.
+        assert sessions[0]["pid"] == 100
         assert sessions[1]["live"] is False
         assert sessions[1]["state"] == "idle"
+        assert sessions[1].get("pid") is None
 
     def test_input_state_when_mtime_is_stale(self):
         """Between 10s and 5min since last JSONL write = "input": the

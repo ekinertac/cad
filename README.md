@@ -73,7 +73,7 @@ cad reads from each agent's own storage; it never writes back. Agent files (`~/.
 Most of the time you just run `cad`. The other commands are HTML-rendering carryovers from the original tool this grew out of:
 
 - `cad` / `cad local` — the picker described above (default)
-- `cad live` — interactive dashboard of running agent sessions across all projects. Refreshes every 2 seconds so state changes (`[working]` / `[input]` / `[idle]`) surface without re-running. Enter **peeks** the highlighted session (read-only snapshot in `$PAGER`) — it never resumes, because spawning a second agent on a session that's already running in another terminal would corrupt the JSONL. To resume a live session safely, close the other terminal first, then `cad local`.
+- `cad live` — full-screen dashboard of running agent sessions, grouped by project. Refreshes every 2 seconds so state changes (`[working]` / `[input]` / `[idle]`) surface without re-running. Enter brings the terminal tab running the selected session to the front (iTerm2 today, matched by tty); if that can't work — different terminal, unbound session, no match — it falls back to peeking the session in `$PAGER`. Resume is intentionally NOT bound: spawning a second agent on a JSONL that's already running in another terminal would corrupt the conversation.
 - `cad json <file>` — render a specific JSONL/JSON file to HTML; accepts a URL too
 - `cad all` — bulk-render every claude session to a browsable archive
 - `cad web [<session-id>]` — claude-for-web sessions via the API (currently broken upstream, see [simonw/claude-code-transcripts#77](https://github.com/simonw/claude-code-transcripts/issues/77))
@@ -93,7 +93,7 @@ Each agent's discovery is one function returning a list of session dicts with `p
 ## Development
 
 ```bash
-uv run pytest          # 185 tests
+uv run pytest          # 221 tests
 uv run black .         # format before commit
 uv run cad             # run the dev copy
 ```

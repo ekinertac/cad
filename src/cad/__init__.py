@@ -1903,12 +1903,17 @@ def _annotate_sessions_with_live_state(sessions, live_state, now=None):
     for s in sessions:
         s["live"] = False
         s["state"] = "idle"
+        s["pid"] = None
 
     # Bound: each --resume uuid maps to exactly one session.
     for s in sessions:
         if s["provider"] == "claude" and s["session_id"] in bound:
             s["live"] = True
             s["state"] = _state_from_mtime(s)
+            # Carry the PID forward — downstream features (terminal
+            # focus, future kill / attach actions) need to reach the
+            # actual process and can't realistically re-shell pgrep.
+            s["pid"] = bound[s["session_id"]].get("pid")
 
     # Unbound: for each cwd with N fresh claudes, bind to the N most
     # recently-modified claude JSONLs in that cwd that aren't already
@@ -3615,6 +3620,95 @@ _STATE_TEXT_LABELS = {
 }
 
 
+def _resolve_pid_tty(pid):
+    """Return the /dev tty of ``pid`` (e.g. ``/dev/ttys004``) or None
+    if ps can't see it. Used by ``focus_live_session`` to map a live
+    claude process onto a terminal tab.
+
+    A child process shares its parent shell's pty, so claude's tty is
+    the same one the terminal emulator reports for that tab —
+    matching by tty is what lets us go pid → iTerm2 session.
+    """
+    try:
+        r = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "tty="],
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return None
+    if r.returncode != 0:
+        return None
+    raw = (r.stdout or "").strip()
+    if not raw or raw == "?":
+        return None
+    # ps prints the basename (ttys004), iTerm2's AppleScript reports
+    # /dev/ttys004. Normalise to the absolute form.
+    return raw if raw.startswith("/") else f"/dev/{raw}"
+
+
+# AppleScript that walks every iTerm2 window/tab/session looking for a
+# session whose tty matches ours, then selects window→tab→session so
+# the tab comes to the front. Returns "ok" on a match and "no-match"
+# otherwise so we can surface a useful boolean to the caller.
+_ITERM2_FOCUS_BY_TTY_OSASCRIPT = """
+on run argv
+    set targetTTY to item 1 of argv
+    tell application "iTerm2"
+        repeat with w in windows
+            repeat with t in tabs of w
+                repeat with s in sessions of t
+                    if tty of s is targetTTY then
+                        tell w to select
+                        tell t to select
+                        tell s to select
+                        activate
+                        return "ok"
+                    end if
+                end repeat
+            end repeat
+        end repeat
+    end tell
+    return "no-match"
+end run
+"""
+
+
+def focus_live_session(session):
+    """Bring the terminal tab running this live session to the front.
+    Returns True on success, False if we can't (unsupported terminal,
+    no PID, ps failure, no matching tab). Callers fall back to peek
+    when we return False so Enter is never a no-op.
+
+    Only iTerm2 is wired up so far. Agamon could plug in here once it
+    exposes a focus-by-tty IPC. Terminal.app, Alacritty, and plain
+    tmux-without-host-integration aren't supportable from a child
+    process without proprietary escape codes.
+    """
+    pid = session.get("pid")
+    if not pid:
+        return False
+    term_program = os.environ.get("TERM_PROGRAM", "")
+    if term_program != "iTerm.app":
+        return False
+    tty = _resolve_pid_tty(pid)
+    if not tty:
+        return False
+    try:
+        r = subprocess.run(
+            ["osascript", "-e", _ITERM2_FOCUS_BY_TTY_OSASCRIPT, tty],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+    except (subprocess.SubprocessError, OSError):
+        return False
+    if r.returncode != 0:
+        return False
+    return (r.stdout or "").strip() == "ok"
+
+
 def _build_live_entries():
     """Snapshot of every live agent session across all projects, ready
     to feed into ``select_entry``. Each project group is led by a
@@ -3665,6 +3759,10 @@ def _build_live_entries():
                     "mtime": s["mtime"],
                     "live": s["live"],
                     "state": s["state"],
+                    # PID is None for unbound (cwd-matched) sessions;
+                    # the focus action knows to fall back to peek when
+                    # it's missing.
+                    "pid": s.get("pid"),
                     # No extra indent here — ``select_entry`` already
                     # prefixes each row with a 2-char arrow column and
                     # a 2-char state-marker column, which naturally
@@ -3710,10 +3808,13 @@ def live_cmd():
 
     picked = select_entry(
         entries,
-        # Enter = peek (snapshot view) because every row is a live
-        # process. Resuming any of them would mean two agents on the
-        # same JSONL.
-        actions={"enter": "peek"},
+        # Enter = "go to this session". First try to bring the
+        # terminal tab running it to the foreground (iTerm2 today,
+        # agamon/others can plug in later via ``focus_live_session``).
+        # If that's not possible, fall back to peek so Enter is never
+        # a silent no-op. Resume is NOT bound here — spawning a second
+        # agent on a live JSONL would corrupt the conversation.
+        actions={"enter": "go"},
         refresh_callback=_build_live_entries,
         refresh_interval=2.0,
         # No pagination on the live dashboard — the user wants to see
@@ -3728,7 +3829,10 @@ def live_cmd():
     if picked is None:
         return
     session, _ = picked
-    # Same peek path the session picker uses for `p`.
+    if focus_live_session(session):
+        return
+    # No terminal integration matched (or no PID to match against);
+    # show the user what's in the session instead of doing nothing.
     peek_session(session)
 
 
