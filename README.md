@@ -10,24 +10,52 @@ One CLI to drive every coding agent on your machine. cad discovers local session
 **`cad`** — project picker → session picker. The everyday view.
 
 ```
-» self-healing-crawler         2026-05-11 13:34   15 sessions  (9c+1p+1o+3f)
-  arcade                       2026-05-11 12:18   12 sessions  (6c+5o+1f)
+» raycaster-rs                 2026-05-13 09:14   12 sessions  (8c+1x+3o)  [2 live]
+  tile-engine                  2026-05-13 08:50    7 sessions  (7c)        [1 live]
+  dotfiles                     2026-05-12 21:50    4 sessions  (4c)
+  ui-experiments               2026-05-12 18:32    9 sessions  (5c+4o)
+  scratchpad                   2026-05-11 14:08    3 sessions  (2c+1p)
   Global Sessions              2026-05-10 23:40   95 sessions  (34c+3x+3p+50o+5f)
+
+ Enter=open · n=new · r=rename · /=search · q/Esc=quit
 ```
 
-**`cad live`** — full-screen dashboard of every agent process running right now, grouped by project, auto-refreshing.
+Drilling into a project — `Enter` or auto-pick when you're already inside it — shows the session list:
 
 ```
-alpha
-» ● [working]  claude/Wire EmulatorJS into Arcade Vault Catalog
-  ● [idle]     claude/ArcadeVault — read @HANDOFF.md
+» ● 2026-05-13 09:14    24 KB  claude/ Wire viewport culling into the tile renderer
+  ● 2026-05-13 08:55    18 KB  claude/dda-corners — fix DDA edge cases at block boundaries
+    2026-05-12 21:50     9 KB  claude/ Profile main loop, identify hot path for next pass
+    2026-05-12 18:32    41 KB  claude/ Refactor input handling into its own module
+    2026-05-11 14:08     7 KB  codex/   Try Rust ndarray for the depth buffer
+    2026-05-10 22:15    52 KB  opencode/ Sprite atlas packing, port from python prototype
+    2026-05-09 10:02    33 KB  claude/   First pass on the BSP partitioner
 
-self-healing-crawler
-  ● [input]    claude/healing-2 — do you know what we were working on?
-
-humbl.ai
-  ● [input]    claude/Verify production API processes on remote server
+ Enter=resume · n=new · h=html · r=rename · s=summarize · m=move · p=peek · /=search · Esc/Bksp=back · q=quit
 ```
+
+The two coloured dots on the top rows are live indicators — green for `[working]`, yellow for `[input]` — the same scheme `cad live` uses below.
+
+**`cad live`** — full-screen dashboard of every agent process running right now, grouped by project, auto-refreshing every 2s.
+
+```
+raycaster-rs
+» ● [working]  claude/ Wire viewport culling into the tile renderer
+  ● [input]    claude/dda-corners — fix DDA edge cases at block boundaries
+
+tile-engine
+  ● [input]    claude/ Implement chunked terrain streaming for large maps
+
+ui-experiments
+  ● [idle]     claude/ Storybook setup with a11y addons and visual regression
+
+Global Sessions
+  ● [idle]     claude/ Sketch the MCP-management CLI prototype
+
+ Enter=go · /=search · q/Esc=quit
+```
+
+`[working]` = JSONL written within 10s (agent is producing output). `[input]` = alive but quiet (waiting on you). `[idle]` = alive but stale 5+ minutes.
 
 ## Install
 
