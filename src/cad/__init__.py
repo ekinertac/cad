@@ -216,35 +216,13 @@ from .features.web import (  # noqa: E402,F401
 # is conceptually web/HTML but currently still consumed by code
 # remaining in this file. Stays here until features/html is extracted.
 
-@click.group(cls=DefaultGroup, default="local", default_if_no_args=True)
-@click.version_option(None, "-v", "--version", package_name="cad")
-def cli():
-    """cad — Coding Agent Driver. Manage sessions across claude, codex,
-    pi, opencode, and forge from one picker, or render Claude Code
-    sessions to HTML."""
-    pass
-
 # Local actions (peek + summarize) live in features/local/. Re-exported
 # at the cad top level because features/live and the existing tests
 # reach for `cad.peek_session` / `cad.summarize_session` directly.
 from .features.local import peek_session, summarize_session  # noqa: E402,F401
 
 
-# Register feature commands. Each features/<name>/__init__.py exports a
-# register(cli) hook so subcommands plug in here without __init__.py
-# having to know the internals. To remove a feature: delete its
-# directory and remove the corresponding register() call.
-from .features import html as _html_feature  # noqa: E402
-from .features import live as _live_feature  # noqa: E402
-from .features import local as _local_feature  # noqa: E402
-from .features import shell_init as _shell_init_feature  # noqa: E402
-from .features import web as _web_feature  # noqa: E402
-
-_local_feature.register(cli)
-_live_feature.register(cli)
-_shell_init_feature.register(cli)
-_web_feature.register(cli)
-_html_feature.register(cli)
-
-def main():
-    cli()
+# The click command group and entry-point live in cli.py. Importing
+# `cli` triggers the feature register loop as a side effect, so
+# `from cad import cli` is what binds every subcommand to the group.
+from .cli import cli, main  # noqa: E402,F401
