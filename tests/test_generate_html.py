@@ -1425,9 +1425,9 @@ class TestLiveCommand:
         monkeypatch.setattr(ct, "_annotate_sessions_with_live_state", fake_annotate)
 
         entries = ct._build_live_entries()
-        # 2 project headers + 3 sessions = 5 rows.
-        assert len(entries) == 5
-        headers = [e for e in entries if e.get("header")]
+        # 2 project headers + 1 inter-group spacer + 3 sessions = 6 rows.
+        assert len(entries) == 6
+        headers = [e for e in entries if e.get("header") and e["display"].strip()]
         assert sorted(h["display"].strip() for h in headers) == ["alpha", "beta"]
         # The header sitting above alpha-1 should be the alpha header.
         alpha_one_idx = next(

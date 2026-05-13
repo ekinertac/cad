@@ -3603,6 +3603,11 @@ def _build_live_entries():
         if not live:
             continue
         live.sort(key=lambda s: state_order.get(s.get("state"), 3))
+        # Blank spacer row between groups so the eye separates one
+        # project from the next. The first group gets no leading
+        # spacer — it's already visually at the top.
+        if entries:
+            entries.append({"header": True, "display": ""})
         entries.append({"header": True, "display": p["name"]})
         for s in live:
             load_session_summary(s)
