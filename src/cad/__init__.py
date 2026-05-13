@@ -39,11 +39,9 @@ _jinja_env = Environment(
 _macros_template = _jinja_env.get_template("macros.html")
 _macros = _macros_template.module
 
-
 def get_template(name):
     """Get a Jinja2 template by name."""
     return _jinja_env.get_template(name)
-
 
 # Regex to match git commit output: [branch hash] message
 COMMIT_PATTERN = re.compile(r"\[[\w\-/]+ ([a-f0-9]{7,})\] (.+?)(?:\n|$)")
@@ -57,7 +55,6 @@ PROMPTS_PER_PAGE = 5
 LONG_TEXT_THRESHOLD = (
     300  # Characters - text blocks longer than this are shown in index
 )
-
 
 # Session parsing / transcript extraction lives in core/session_model.py.
 # Re-exported for test compatibility and any callers reaching in.
@@ -83,11 +80,6 @@ _github_repo = None
 API_BASE_URL = "https://api.anthropic.com/v1"
 ANTHROPIC_VERSION = "2023-06-01"
 
-
-
-
-
-
 # Picker + prompts moved to core/picker.py.
 from .core.picker import (  # noqa: E402,F401
     prompt_confirm,
@@ -96,7 +88,6 @@ from .core.picker import (  # noqa: E402,F401
     select_entry,
     select_session_action,
 )
-
 
 # Provider abstraction lives in core/providers.py — re-exported so legacy
 # imports (`from cad import resume_session` etc.) still resolve.
@@ -108,15 +99,9 @@ from .core.providers import (  # noqa: E402,F401
     resume_session,
 )
 
-
 # `command cad` in the wrapper skips this function so the binary runs once.
 # zsh and bash get separate snippets only because the conditional syntax
 # differs slightly; the mechanism is identical.
-
-
-
-
-
 
 def peek_session(session):
     """Render the session's prompts/replies to a temp markdown file and
@@ -165,7 +150,6 @@ def peek_session(session):
             os.unlink(path)
         except OSError:
             pass
-
 
 def summarize_session(session):
     """Generate a short title for the session by piping an excerpt to the
@@ -224,36 +208,8 @@ def summarize_session(session):
         raise click.ClickException("codex returned an empty title.")
     return title
 
-
-SHELL_WRAPPERS = {
-    "zsh": """\
-cad() {
-  local cwd_file
-  cwd_file=$(mktemp -t cad-cwd.XXXXXX)
-  CAD_CWD_FILE="$cwd_file" command cad "$@"
-  local rc=$?
-  if [[ -s "$cwd_file" ]]; then
-    cd "$(< "$cwd_file")" || true
-  fi
-  rm -f "$cwd_file"
-  return $rc
-}
-""",
-    "bash": """\
-cad() {
-  local cwd_file
-  cwd_file=$(mktemp -t cad-cwd.XXXXXX)
-  CAD_CWD_FILE="$cwd_file" command cad "$@"
-  local rc=$?
-  if [ -s "$cwd_file" ]; then
-    cd "$(cat "$cwd_file")" || true
-  fi
-  rm -f "$cwd_file"
-  return $rc
-}
-""",
-}
-
+# Shell wrapper snippets moved to features/shell_init/.
+from .features.shell_init import SHELL_WRAPPERS  # noqa: E402,F401
 
 # Temp output constants + helpers live in core/util.py now. Re-export
 # the module-level names for any legacy callers (and tests) that import
@@ -266,11 +222,6 @@ from .core.util import (  # noqa: E402,F401
     _prune_temp_outputs,
     _temp_output_dir,
 )
-
-
-
-
-
 
 # Per-provider discovery lives in core/discovery.py — re-exported for
 # legacy import paths and tests.
@@ -325,7 +276,6 @@ from .features.live import (  # noqa: E402,F401
     focus_live_session,
 )
 
-
 def find_local_projects(folder=None):
     """Shim: call the core grouping function with the live annotator
     wired in. core/projects.py knows nothing about pgrep/lsof; this
@@ -333,138 +283,12 @@ def find_local_projects(folder=None):
     caller doing ``from cad import find_local_projects``."""
     return _find_local_projects_core(folder=folder, annotate_live=_live_default_annotator)
 
-
-
-
-
-
-
-
-def _claude_encode_path(path):
-    """Replicate Claude Code's directory-encoding scheme. Both ``/`` and
-    ``.`` are replaced with ``-`` — e.g. ``/Users/x/Code/humbl.ai`` becomes
-    ``-Users-x-Code-humbl-ai``. Verified against folders on disk."""
-    return re.sub(r"[/.]", "-", str(path))
-
-
-# State that claude maintains in parallel directories alongside projects/.
-# Each is keyed by the same encoded path. We move all that exist for a
-# given project — leaving any behind would let claude see stale references.
-_CLAUDE_STATE_DIRS = ("projects", "file-history", "todos", "shell-snapshots")
-
-
-def migrate_claude_project(old_cwd, new_cwd, backup_root=None, dry_run=False):
-    """Move a claude project's on-disk state from one cwd to another.
-
-    1. Backup the four ``~/.claude/<dir>/<old_enc>/`` trees (where they
-       exist) into ``backup_root`` so the user has a one-command undo.
-    2. Move each ``~/.claude/<dir>/<old_enc>/`` to ``<new_enc>/``. If the
-       destination already exists, merge file-by-file (existing files at
-       the destination win — we never overwrite).
-    3. Rewrite the ``cwd`` field in every JSONL line under the new
-       ``projects/<new_enc>/`` directory.
-
-    Mechanism is from https://www.vincentschmalbach.com/migrate-claude-code-sessions-to-a-new-computer/
-    cross-checked against claude's actual filter behaviour (claude --resume
-    filters its picker by cwd inside the JSONL, not by folder name).
-
-    Returns a dict::
-
-        {
-            "moved_dirs":      [(old_path, new_path), ...],
-            "rewritten_files": [Path, ...],
-            "backup_dir":      Path | None,
-            "skipped":         ["projects exists at target", ...],
-        }
-    """
-    old_enc = _claude_encode_path(old_cwd)
-    new_enc = _claude_encode_path(new_cwd)
-    if old_enc == new_enc:
-        raise click.ClickException(
-            "Old and new cwd encode to the same path — nothing to migrate."
-        )
-
-    claude_root = Path.home() / ".claude"
-    result = {
-        "moved_dirs": [],
-        "rewritten_files": [],
-        "backup_dir": None,
-        "skipped": [],
-    }
-
-    # Phase 1 — backup. Only copy what actually exists; don't create empty
-    # backup trees for state dirs that don't apply to this project.
-    if backup_root and not dry_run:
-        ts = datetime.now().strftime("%Y-%m-%dT%H-%M-%S")
-        backup_dir = backup_root / f"claude-migrate-{ts}"
-        for base in _CLAUDE_STATE_DIRS:
-            src = claude_root / base / old_enc
-            if src.exists():
-                dst = backup_dir / base / old_enc
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(src, dst)
-        result["backup_dir"] = backup_dir if backup_dir.exists() else None
-
-    # Phase 2 — move each state dir if it exists.
-    for base in _CLAUDE_STATE_DIRS:
-        src = claude_root / base / old_enc
-        dst = claude_root / base / new_enc
-        if not src.exists():
-            continue
-        if dst.exists():
-            # Merge: move individual entries, skipping any name collisions
-            # so we never clobber an existing file in the destination.
-            for entry in src.iterdir():
-                target = dst / entry.name
-                if target.exists():
-                    result["skipped"].append(f"{base}/{new_enc}/{entry.name} exists")
-                    continue
-                if not dry_run:
-                    shutil.move(str(entry), str(target))
-            # Best-effort cleanup of the (now hopefully empty) source dir.
-            try:
-                if not dry_run:
-                    src.rmdir()
-            except OSError:
-                pass
-            result["moved_dirs"].append((src, dst))
-        else:
-            if not dry_run:
-                shutil.move(str(src), str(dst))
-            result["moved_dirs"].append((src, dst))
-
-    # Phase 3 — rewrite cwd inside every JSONL under the new projects dir.
-    new_project_dir = claude_root / "projects" / new_enc
-    if new_project_dir.exists():
-        old_cwd_str = str(old_cwd)
-        new_cwd_str = str(new_cwd)
-        for jsonl in new_project_dir.glob("*.jsonl"):
-            if dry_run:
-                result["rewritten_files"].append(jsonl)
-                continue
-            # Preserve mtime — the session content didn't semantically
-            # change, only its location label. Lets cad's sort order
-            # remain stable across a migration.
-            stat = jsonl.stat()
-            text = jsonl.read_text(encoding="utf-8")
-            new_text = text.replace(f'"cwd":"{old_cwd_str}"', f'"cwd":"{new_cwd_str}"')
-            if new_text != text:
-                jsonl.write_text(new_text, encoding="utf-8")
-                os.utime(jsonl, (stat.st_atime, stat.st_mtime))
-                result["rewritten_files"].append(jsonl)
-
-    return result
-
-
-
-
-
-
-
-
-
-
-
+# Project-rename machinery moved to features/project_rename/.
+from .features.project_rename import (  # noqa: E402,F401
+    _CLAUDE_STATE_DIRS,
+    _claude_encode_path,
+    migrate_claude_project,
+)
 
 def generate_batch_html(
     source_folder, output_dir, include_agents=False, progress_callback=None
@@ -542,7 +366,6 @@ def generate_batch_html(
         "output_dir": output_dir,
     }
 
-
 def _generate_project_index(project, output_dir):
     """Generate index.html for a single project."""
     template = get_template("project_index.html")
@@ -570,7 +393,6 @@ def _generate_project_index(project, output_dir):
 
     output_path = output_dir / "index.html"
     output_path.write_text(html_content, encoding="utf-8")
-
 
 def _generate_master_index(projects, output_dir):
     """Generate master index.html listing all projects."""
@@ -610,12 +432,10 @@ def _generate_master_index(projects, output_dir):
     output_path = output_dir / "index.html"
     output_path.write_text(html_content, encoding="utf-8")
 
-
 class CredentialsError(Exception):
     """Raised when credentials cannot be obtained."""
 
     pass
-
 
 def get_access_token_from_keychain():
     """Get access token from macOS keychain.
@@ -649,7 +469,6 @@ def get_access_token_from_keychain():
     except (json.JSONDecodeError, subprocess.SubprocessError):
         return None
 
-
 def get_org_uuid_from_config():
     """Get organization UUID from ~/.claude.json.
 
@@ -666,7 +485,6 @@ def get_org_uuid_from_config():
     except (json.JSONDecodeError, IOError):
         return None
 
-
 def get_api_headers(token, org_uuid):
     """Build API request headers."""
     return {
@@ -675,7 +493,6 @@ def get_api_headers(token, org_uuid):
         "Content-Type": "application/json",
         "x-organization-uuid": org_uuid,
     }
-
 
 def fetch_sessions(token, org_uuid):
     """Fetch list of sessions from the API.
@@ -687,7 +504,6 @@ def fetch_sessions(token, org_uuid):
     response = httpx.get(f"{API_BASE_URL}/sessions", headers=headers, timeout=30.0)
     response.raise_for_status()
     return response.json()
-
 
 def fetch_session(token, org_uuid, session_id):
     """Fetch a specific session from the API.
@@ -703,7 +519,6 @@ def fetch_session(token, org_uuid, session_id):
     )
     response.raise_for_status()
     return response.json()
-
 
 def detect_github_repo(loglines):
     """
@@ -729,7 +544,6 @@ def detect_github_repo(loglines):
                     if match:
                         return match.group(1)
     return None
-
 
 def extract_repo_from_session(session):
     """Extract GitHub repo from session metadata.
@@ -764,7 +578,6 @@ def extract_repo_from_session(session):
 
     return None
 
-
 def enrich_sessions_with_repos(sessions, token=None, org_uuid=None, fetch_fn=None):
     """Enrich sessions with repo information from session metadata.
 
@@ -784,7 +597,6 @@ def enrich_sessions_with_repos(sessions, token=None, org_uuid=None, fetch_fn=Non
         enriched.append(session_copy)
     return enriched
 
-
 def filter_sessions_by_repo(sessions, repo):
     """Filter sessions by repo.
 
@@ -799,7 +611,6 @@ def filter_sessions_by_repo(sessions, repo):
         return sessions
     return [s for s in sessions if s.get("repo") == repo]
 
-
 def format_json(obj):
     try:
         if isinstance(obj, str):
@@ -809,12 +620,10 @@ def format_json(obj):
     except (json.JSONDecodeError, TypeError):
         return f"<pre>{html.escape(str(obj))}</pre>"
 
-
 def render_markdown_text(text):
     if not text:
         return ""
     return markdown.markdown(text, extensions=["fenced_code", "tables"])
-
 
 def is_json_like(text):
     if not text or not isinstance(text, str):
@@ -824,20 +633,17 @@ def is_json_like(text):
         text.startswith("[") and text.endswith("]")
     )
 
-
 def render_todo_write(tool_input, tool_id):
     todos = tool_input.get("todos", [])
     if not todos:
         return ""
     return _macros.todo_list(todos, tool_id)
 
-
 def render_write_tool(tool_input, tool_id):
     """Render Write tool calls with file path header and content preview."""
     file_path = tool_input.get("file_path", "Unknown file")
     content = tool_input.get("content", "")
     return _macros.write_tool(file_path, content, tool_id)
-
 
 def render_edit_tool(tool_input, tool_id):
     """Render Edit tool calls with diff-like old/new display."""
@@ -847,13 +653,11 @@ def render_edit_tool(tool_input, tool_id):
     replace_all = tool_input.get("replace_all", False)
     return _macros.edit_tool(file_path, old_string, new_string, replace_all, tool_id)
 
-
 def render_bash_tool(tool_input, tool_id):
     """Render Bash tool calls with command as plain text."""
     command = tool_input.get("command", "")
     description = tool_input.get("description", "")
     return _macros.bash_tool(command, description, tool_id)
-
 
 def render_content_block(block):
     if not isinstance(block, dict):
@@ -951,7 +755,6 @@ def render_content_block(block):
     else:
         return format_json(block)
 
-
 def render_user_message_content(message_data):
     content = message_data.get("content", "")
     if isinstance(content, str):
@@ -962,17 +765,14 @@ def render_user_message_content(message_data):
         return "".join(render_content_block(block) for block in content)
     return f"<p>{html.escape(str(content))}</p>"
 
-
 def render_assistant_message(message_data):
     content = message_data.get("content", [])
     if not isinstance(content, list):
         return f"<p>{html.escape(str(content))}</p>"
     return "".join(render_content_block(block) for block in content)
 
-
 def make_msg_id(timestamp):
     return f"msg-{timestamp.replace(':', '-').replace('.', '-')}"
-
 
 def analyze_conversation(messages):
     """Analyze messages in a conversation to extract stats and long texts."""
@@ -1017,7 +817,6 @@ def analyze_conversation(messages):
         "commits": commits,
     }
 
-
 def format_tool_stats(tool_counts):
     """Format tool counts into a concise summary string."""
     if not tool_counts:
@@ -1044,7 +843,6 @@ def format_tool_stats(tool_counts):
 
     return " · ".join(parts)
 
-
 def is_tool_result_message(message_data):
     """Check if a message contains only tool_result blocks."""
     content = message_data.get("content", [])
@@ -1056,7 +854,6 @@ def is_tool_result_message(message_data):
         isinstance(block, dict) and block.get("type") == "tool_result"
         for block in content
     )
-
 
 def render_message(log_type, message_json, timestamp):
     if not message_json:
@@ -1081,7 +878,6 @@ def render_message(log_type, message_json, timestamp):
         return ""
     msg_id = make_msg_id(timestamp)
     return _macros.message(role_class, role_label, msg_id, timestamp, content_html)
-
 
 CSS = """
 /* iMessage-style dark theme. The markup is unchanged from the prior light
@@ -1414,7 +1210,6 @@ GIST_PREVIEW_JS = r"""
 })();
 """
 
-
 def inject_gist_preview_js(output_dir):
     """Inject gist preview JavaScript into all HTML files in the output directory."""
     output_dir = Path(output_dir)
@@ -1426,7 +1221,6 @@ def inject_gist_preview_js(output_dir):
                 "</body>", f"<script>{GIST_PREVIEW_JS}</script>\n</body>"
             )
             html_file.write_text(content, encoding="utf-8")
-
 
 def create_gist(output_dir, public=False):
     """Create a GitHub gist from the HTML files in output_dir.
@@ -1465,15 +1259,12 @@ def create_gist(output_dir, public=False):
             "gh CLI not found. Install it from https://cli.github.com/ and run 'gh auth login'."
         )
 
-
 def generate_pagination_html(current_page, total_pages):
     return _macros.pagination(current_page, total_pages)
-
 
 def generate_index_pagination_html(total_pages):
     """Generate pagination for index page where Index is current (first page)."""
     return _macros.index_pagination(total_pages)
-
 
 def generate_html(json_path, output_dir, github_repo=None):
     output_dir = Path(output_dir)
@@ -1649,7 +1440,6 @@ def generate_html(json_path, output_dir, github_repo=None):
         f"Generated {index_path.resolve()} ({total_convs} prompts, {total_pages} pages)"
     )
 
-
 @click.group(cls=DefaultGroup, default="local", default_if_no_args=True)
 @click.version_option(None, "-v", "--version", package_name="cad")
 def cli():
@@ -1658,39 +1448,15 @@ def cli():
     sessions to HTML."""
     pass
 
-
 # Register feature commands. Each features/<name>/__init__.py exports a
 # register(cli) hook so subcommands plug in here without __init__.py
 # having to know the internals. To remove a feature: delete its
 # directory and remove the corresponding register() call.
 from .features import live as _live_feature  # noqa: E402
+from .features import shell_init as _shell_init_feature  # noqa: E402
 
 _live_feature.register(cli)
-
-
-@cli.command("shell-init")
-@click.argument("shell", type=click.Choice(sorted(SHELL_WRAPPERS.keys())))
-def shell_init_cmd(shell):
-    """Print a shell wrapper function for `cad`.
-
-    Install once by adding this line to your rc file::
-
-        eval "$(cad shell-init zsh)"   # or bash
-
-    The wrapper makes Enter (resume) leave your shell inside the project
-    directory after the agent exits. Without it, you stay in whichever
-    directory you ran `cad` from — a Unix child process can't cd its
-    parent shell.
-    """
-    click.echo(SHELL_WRAPPERS[shell], nl=False)
-
-
-
-
-
-
-
-
+_shell_init_feature.register(cli)
 
 
 @cli.command("local")
@@ -2101,11 +1867,9 @@ def local_cmd(
         index_url = (output / "index.html").resolve().as_uri()
         webbrowser.open(index_url)
 
-
 def is_url(path):
     """Check if a path is a URL (starts with http:// or https://)."""
     return path.startswith("http://") or path.startswith("https://")
-
 
 def fetch_url_to_tempfile(url):
     """Fetch a URL and save to a temporary file.
@@ -2139,7 +1903,6 @@ def fetch_url_to_tempfile(url):
     temp_file = temp_dir / f"claude-url-{url_name}{suffix}"
     temp_file.write_text(response.text, encoding="utf-8")
     return temp_file
-
 
 @cli.command("json")
 @click.argument("json_file", type=click.Path())
@@ -2229,7 +1992,6 @@ def json_cmd(json_file, output, output_auto, repo, gist, include_json, open_brow
         index_url = (output / "index.html").resolve().as_uri()
         webbrowser.open(index_url)
 
-
 def resolve_credentials(token, org_uuid):
     """Resolve token and org_uuid from arguments or auto-detect.
 
@@ -2261,7 +2023,6 @@ def resolve_credentials(token, org_uuid):
 
     return token, org_uuid
 
-
 def format_session_for_display(session_data):
     """Format a session for display in the list or picker.
 
@@ -2278,7 +2039,6 @@ def format_session_for_display(session_data):
     repo_display = repo if repo else "(no repo)"
     date_display = created_at[:19] if created_at else "N/A"
     return f"{repo_display:30}  {date_display:19}  {title}"
-
 
 def generate_html_from_session_data(session_data, output_dir, github_repo=None):
     """Generate HTML from session data dict (instead of file path)."""
@@ -2448,7 +2208,6 @@ def generate_html_from_session_data(session_data, output_dir, github_repo=None):
         f"Generated {index_path.resolve()} ({total_convs} prompts, {total_pages} pages)"
     )
 
-
 @cli.command("web")
 @click.argument("session_id", required=False)
 @click.option(
@@ -2600,7 +2359,6 @@ def web_cmd(
         index_url = (output / "index.html").resolve().as_uri()
         webbrowser.open(index_url)
 
-
 @cli.command("all")
 @click.option(
     "-s",
@@ -2723,7 +2481,6 @@ def all_cmd(source, output, include_agents, dry_run, open_browser, quiet):
     if open_browser:
         index_url = (output / "index.html").resolve().as_uri()
         webbrowser.open(index_url)
-
 
 def main():
     cli()
