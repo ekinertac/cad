@@ -286,6 +286,7 @@ def select_entry(
     initial_selected=0,
     refresh_callback=None,
     refresh_interval=2.0,
+    page_size=18,
 ):
     """Interactive list picker with per-key actions and modal search.
 
@@ -342,7 +343,15 @@ def select_entry(
         "search_mode": False,
         "result": None,
     }
-    VISIBLE = 18
+    # ``page_size=None`` opts out of pagination — the viewport grows
+    # to include every entry. Used by ``cad live`` where the user
+    # wants the whole live dashboard on screen at once, no scrolling.
+    # Other pickers cap at a fixed window so they don't take over the
+    # whole terminal.
+    NO_PAGINATION = page_size is None
+
+    def viewport_size():
+        return max(1, len(filtered_indices())) if NO_PAGINATION else page_size
 
     def is_selectable(idx_into_indices, indices):
         """Header rows (``header: True``) are visual separators only —
@@ -393,10 +402,11 @@ def select_entry(
                 target = next_selectable(indices, state["selected"], -1)
             if target is not None:
                 state["selected"] = target
-        top = max(0, state["selected"] - VISIBLE // 2)
-        top = min(top, max(0, len(indices) - VISIBLE))
-        visible = indices[top : top + VISIBLE]
-        return visible, top, max(0, len(indices) - top - len(visible))
+        vp = viewport_size()
+        top = max(0, state["selected"] - vp // 2)
+        top = min(top, max(0, len(indices) - vp))
+        visible_indices = indices[top : top + vp]
+        return visible_indices, top, max(0, len(indices) - top - len(visible_indices))
 
     def get_list_text():
         indices = filtered_indices()
@@ -488,7 +498,8 @@ def select_entry(
     @kb.add("pageup")
     def _(event):
         indices = filtered_indices()
-        target = next_selectable(indices, max(0, state["selected"] - VISIBLE), -1)
+        vp = viewport_size()
+        target = next_selectable(indices, max(0, state["selected"] - vp), -1)
         if target is None:
             # No selectable row at-or-before the page-up target; fall
             # forward instead so we don't stick on a header.
@@ -499,8 +510,9 @@ def select_entry(
     @kb.add("pagedown")
     def _(event):
         indices = filtered_indices()
+        vp = viewport_size()
         target = next_selectable(
-            indices, min(len(indices) - 1, state["selected"] + VISIBLE), 1
+            indices, min(len(indices) - 1, state["selected"] + vp), 1
         )
         if target is None:
             target = next_selectable(indices, len(indices) - 1, -1)
@@ -586,12 +598,22 @@ def select_entry(
             state["filter"] += char
             state["selected"] = 0
 
+    def get_window_height():
+        # Recomputed on every render — when ``page_size=None`` the
+        # window grows to match the current entry count (plus a couple
+        # of slack rows for the ▲/▼ hint lines, even though they
+        # won't render in the no-pagination case). Recompute is what
+        # lets ``cad live`` resize as projects come and go between
+        # refreshes.
+        vp = viewport_size() + 2
+        return Dimension(min=1, preferred=vp, max=vp)
+
     layout = Layout(
         HSplit(
             [
                 Window(
                     content=FormattedTextControl(text=get_list_text),
-                    height=Dimension(min=1, preferred=VISIBLE + 2, max=VISIBLE + 2),
+                    height=get_window_height,
                     # Long lines clip at the right edge instead of wrapping
                     # into multi-row rows that break the layout.
                     wrap_lines=False,
@@ -3682,6 +3704,10 @@ def live_cmd():
         actions={"enter": "peek"},
         refresh_callback=_build_live_entries,
         refresh_interval=2.0,
+        # No pagination on the live dashboard — the user wants to see
+        # every running session at a glance, not a 18-row window of
+        # them. The window grows to fit content.
+        page_size=None,
     )
     if picked is None:
         return
