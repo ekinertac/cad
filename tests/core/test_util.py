@@ -127,8 +127,6 @@ def snapshot_html(snapshot):
     return snapshot.use_extension(HTMLSnapshotExtension)
 
 
-
-
 class TestPruneTempOutputs:
     """Tests for the temp-output prune helper that bounds disk usage in
     $TMPDIR/cad/."""

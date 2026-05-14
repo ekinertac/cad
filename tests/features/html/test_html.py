@@ -128,8 +128,6 @@ def snapshot_html(snapshot):
     return snapshot.use_extension(HTMLSnapshotExtension)
 
 
-
-
 class TestGenerateHtml:
     """Tests for the main generate_html function."""
 
@@ -188,8 +186,6 @@ class TestGenerateHtml:
         assert "0 prompts" not in index_html
         # The page file should exist
         assert (output_dir / "page-001.html").exists()
-
-
 
 
 class TestRenderFunctions:
@@ -277,8 +273,6 @@ class TestRenderFunctions:
         }
         result = render_bash_tool(tool_input, "tool-123")
         assert result == snapshot_html
-
-
 
 
 class TestRenderContentBlock:
@@ -445,8 +439,6 @@ class TestRenderContentBlock:
         assert result == snapshot_html
 
 
-
-
 class TestAnalyzeConversation:
     """Tests for conversation analysis."""
 
@@ -510,8 +502,6 @@ class TestAnalyzeConversation:
         assert "Add new feature" in result["commits"][0][1]
 
 
-
-
 class TestFormatToolStats:
     """Tests for tool stats formatting."""
 
@@ -526,8 +516,6 @@ class TestFormatToolStats:
     def test_empty_counts(self):
         """Test empty tool counts."""
         assert format_tool_stats({}) == ""
-
-
 
 
 class TestIsToolResultMessage:
@@ -552,8 +540,6 @@ class TestIsToolResultMessage:
         """Test rejection of empty content."""
         assert is_tool_result_message({"content": []}) is False
         assert is_tool_result_message({"content": "string"}) is False
-
-
 
 
 class TestInjectGistPreviewJs:
@@ -654,8 +640,6 @@ class TestInjectGistPreviewJs:
         assert "DOMContentLoaded" in GIST_PREVIEW_JS
 
 
-
-
 class TestCreateGist:
     """Tests for the create_gist function."""
 
@@ -746,8 +730,6 @@ class TestCreateGist:
         assert "gh CLI not found" in str(exc_info.value)
 
 
-
-
 class TestSessionGistOption:
     """Tests for the session command --gist option."""
 
@@ -819,8 +801,6 @@ class TestSessionGistOption:
         # Verify JS was injected (checks for both domains for backwards compatibility)
         index_content = (output_dir / "index.html").read_text(encoding="utf-8")
         assert "gisthost.github.io" in index_content
-
-
 
 
 class TestContinuationLongTexts:
@@ -924,8 +904,6 @@ class TestContinuationLongTexts:
         assert "Redis JavaScript Module" in index_html
 
 
-
-
 class TestSessionJsonOption:
     """Tests for the session command --json option."""
 
@@ -965,8 +943,6 @@ class TestSessionJsonOption:
         # Should use original filename, not "session.json"
         assert (output_dir / "sample_session.json").exists()
         assert not (output_dir / "session.json").exists()
-
-
 
 
 class TestImportJsonOption:
@@ -1013,8 +989,6 @@ class TestImportJsonOption:
         with open(json_file) as f:
             saved_data = json.load(f)
         assert saved_data == session_data
-
-
 
 
 class TestImportGistOption:
@@ -1070,8 +1044,6 @@ class TestImportGistOption:
         assert "Creating GitHub gist" in result.output
         assert "gist.github.com" in result.output
         assert "gisthost.github.io" in result.output
-
-
 
 
 class TestOpenOption:
@@ -1148,8 +1120,6 @@ class TestOpenOption:
         assert len(opened_urls) == 1
         assert "index.html" in opened_urls[0]
         assert opened_urls[0].startswith("file://")
-
-
 
 
 class TestOutputAutoOption:
@@ -1318,8 +1288,6 @@ class TestOutputAutoOption:
         assert (expected_dir / "index.html").exists()
 
 
-
-
 class TestSearchFeature:
     """Tests for the search feature on index.html pages."""
 
@@ -1397,9 +1365,6 @@ class TestSearchFeature:
 
         # Total pages should be embedded for JS to know how many pages to fetch
         assert "totalPages" in index_html or "total_pages" in index_html
-
-
-
 
 
 class TestGenerateBatchHtml:
@@ -1528,7 +1493,9 @@ class TestGenerateBatchHtml:
             # generate_html and references it via its module namespace,
             # so patch there (the cad-level re-export is a separate
             # binding that doesn't affect the call site).
-            with patch("cad.features.html.generate_html", side_effect=mock_generate_html):
+            with patch(
+                "cad.features.html.generate_html", side_effect=mock_generate_html
+            ):
                 stats = generate_batch_html(projects_dir, output_dir)
 
             # Should have processed session2 successfully
@@ -1537,8 +1504,6 @@ class TestGenerateBatchHtml:
             assert len(stats["failed_sessions"]) == 1
             assert "session1" in stats["failed_sessions"][0]["session"]
             assert "Simulated failure" in stats["failed_sessions"][0]["error"]
-
-
 
 
 class TestAllCommand:
@@ -1655,8 +1620,6 @@ class TestAllCommand:
         assert "project-a" not in result.output
         # Should not create any files
         assert not (output_dir / "index.html").exists()
-
-
 
 
 class TestJsonCommandWithUrl:

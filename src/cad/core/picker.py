@@ -375,9 +375,7 @@ def select_entry(
         # into multi-row rows that break the layout.
         wrap_lines=False,
     )
-    status_window = Window(
-        content=FormattedTextControl(text=get_status_text), height=1
-    )
+    status_window = Window(content=FormattedTextControl(text=get_status_text), height=1)
     # In full-screen mode the picker owns the whole terminal; insert
     # a flexible spacer between the list and the status bar so the
     # status anchors to the bottom edge instead of floating directly

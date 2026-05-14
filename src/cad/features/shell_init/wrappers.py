@@ -9,7 +9,6 @@ bash just want slightly different conditional syntax.
 recursing into the function we're defining.
 """
 
-
 SHELL_WRAPPERS = {
     "zsh": """\
 cad() {

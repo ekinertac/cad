@@ -127,8 +127,6 @@ def snapshot_html(snapshot):
     return snapshot.use_extension(HTMLSnapshotExtension)
 
 
-
-
 class TestFindLocalSessions:
     """Tests for find_local_sessions which discovers local JSONL files."""
 
@@ -245,8 +243,6 @@ class TestFindLocalSessions:
         assert len(results) == 15
 
 
-
-
 class TestQueueOperationFilter:
     """Programmatic `claude -p` calls (from hooks etc.) produce JSONLs
     with `queue-operation` events. Claude's own `--resume` picker hides
@@ -293,8 +289,6 @@ class TestQueueOperationFilter:
         assert ct._is_claude_queue_operation_session(f, scan_lines=50) is False
 
 
-
-
 class TestFindPiSessions:
     """Pi sessions live at ~/.pi/agent/sessions/<encoded>/<ts>_<uuid>.jsonl
     with a session-meta line at the top."""
@@ -321,8 +315,6 @@ class TestFindPiSessions:
         (proj / "no-cwd.jsonl").write_text('{"type":"session","id":"x"}\n')
         (proj / "no-id.jsonl").write_text('{"type":"session","cwd":"/some/dir"}\n')
         assert find_pi_sessions(root) == []
-
-
 
 
 class TestFindOpencodeSessions:
@@ -380,8 +372,6 @@ class TestFindOpencodeSessions:
         assert results[0]["summary"] == "Some session title"
         # Stored value is epoch ms, converted to seconds for our model
         assert results[0]["mtime"] == 1700000.1
-
-
 
 
 class TestFindForgeSessions:

@@ -33,7 +33,7 @@ Drilling into a project — `Enter` or auto-pick when you're already inside it �
     2026-05-10 22:15    52 KB  opencode/ Sprite atlas packing, port from python prototype
     2026-05-09 10:02    33 KB  claude/   First pass on the BSP partitioner
 
- Enter=resume · n=new · h=html · r=rename · s=summarize · m=move · p=peek · /=search · Esc/Bksp=back · q=quit
+ Enter=resume · n=new · h=html · r=rename · s=summarize · m=move · p=peek · d=archive · /=search · Esc/Bksp=back · q=quit
 ```
 
 The two coloured dots on the top rows are live indicators — green for `[working]`, yellow for `[input]` — the same scheme `cad live` uses below.
@@ -99,6 +99,7 @@ Both pickers support `/` for type-to-filter search.
 | `s` | **Summarize** via LLM: pipes a session excerpt to `codex exec --ephemeral` (uses your ChatGPT-account auth, no API credits) and saves the 3-7 word title it returns. |
 | `m` | **Move** to a different project: prompt for a new cwd, validate, save to `~/.cad/cwd-overrides.json`. For sessions that drift across folders. Agent files are never modified. |
 | `p` | **Peek**: opens prompts/assistant replies (no tool noise) in `$PAGER`, scrolled to the most recent turn. Press `q` and you're back on the same row. |
+| `d` | **Archive**: soft-delete. `mv`s the JSONL to `~/.cad/archive/<session-id>.jsonl` after a confirm prompt — gone from cad and from `claude --resume`, recoverable via `cad archive`. Refuses for live sessions and non-claude providers. |
 | `/` | Search-filter mode. Type to narrow, Enter selects, Esc exits search. |
 | `Esc` / `Backspace` | Back to the project picker. |
 | `q` / `Ctrl-C` | Quit. |
@@ -132,6 +133,7 @@ cad <subcommand> --help    # for details
 |---|---|
 | `cad` / `cad local` | Project picker → session picker. The default. |
 | `cad live` | Running-process dashboard, described above. |
+| `cad archive` | Browse archived sessions (`d` on the picker put them there). Enter restores to the original `~/.claude/projects/...` location, `p` peeks, `D` permanently deletes. |
 | `cad json <file>` | Render a specific JSONL/JSON file to HTML. Accepts a URL too. |
 | `cad all` | Bulk-render every claude session to a browsable archive. |
 | `cad web [<session-id>]` | Claude-for-web sessions via the API. Currently broken upstream — see [simonw/claude-code-transcripts#77](https://github.com/simonw/claude-code-transcripts/issues/77). |
@@ -143,6 +145,7 @@ cad <subcommand> --help    # for details
 |---|---|
 | User title overrides | `~/.cad/titles.json` |
 | Cwd overrides (moves) | `~/.cad/cwd-overrides.json` |
+| Archived sessions | `~/.cad/archive/<session-id>.jsonl` |
 | Rename backups | `~/.cad/agent-backups/<timestamp>/` |
 | Temp HTML output | `$TMPDIR/cad/<session-stem>/` (auto-pruned to last 20) |
 | Old name compat | `~/.cct/` auto-migrates to `~/.cad/` on first launch |
@@ -163,7 +166,7 @@ Adding terminal integration for `cad live`'s Enter follows a similar shape — s
 ## Development
 
 ```bash
-uv run pytest          # 221 tests
+uv run pytest          # 231 tests
 uv run black .         # format before commit
 uv run cad             # run the dev copy
 ```

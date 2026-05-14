@@ -127,8 +127,6 @@ def snapshot_html(snapshot):
     return snapshot.use_extension(HTMLSnapshotExtension)
 
 
-
-
 class TestFindProjectForCwd:
     """The auto-pick helper that decides whether to skip the project
     picker when cad is launched inside a known project."""
@@ -175,8 +173,6 @@ class TestFindProjectForCwd:
             self._project("/Users/x/Code/foo"),
         ]
         assert ct._find_project_for_cwd(projects, "/Users/x/Code/foo") is projects[1]
-
-
 
 
 class TestFindLocalProjects:
@@ -434,9 +430,6 @@ class TestFindLocalProjects:
         assert all(r["name"] != "Global Sessions" for r in results)
 
 
-
-
-
 class TestGetProjectDisplayName:
     """Tests for get_project_display_name function."""
 
@@ -455,8 +448,6 @@ class TestGetProjectDisplayName:
     def test_handles_simple_name(self):
         """Test handling already simple names."""
         assert get_project_display_name("simple-project") == "simple-project"
-
-
 
 
 class TestFindAllSessions:

@@ -127,8 +127,6 @@ def snapshot_html(snapshot):
     return snapshot.use_extension(HTMLSnapshotExtension)
 
 
-
-
 class TestMigrateClaudeProject:
     """Direct tests for the migration helper: encoding, dir moves, JSONL
     rewrites, backups."""

@@ -179,18 +179,32 @@ from .features.live import (  # noqa: E402,F401
     focus_live_session,
 )
 
+
 def find_local_projects(folder=None):
     """Shim: call the core grouping function with the live annotator
     wired in. core/projects.py knows nothing about pgrep/lsof; this
     shim lives in __init__.py for backwards compatibility with every
     caller doing ``from cad import find_local_projects``."""
-    return _find_local_projects_core(folder=folder, annotate_live=_live_default_annotator)
+    return _find_local_projects_core(
+        folder=folder, annotate_live=_live_default_annotator
+    )
+
 
 # Project-rename machinery moved to features/project_rename/.
 from .features.project_rename import (  # noqa: E402,F401
     _CLAUDE_STATE_DIRS,
     _claude_encode_path,
     migrate_claude_project,
+)
+
+# Archive / restore moved to features/archive/. Re-exported so the
+# `d` action in features/local/ and the `cad archive` picker can
+# resolve them via the top-level namespace at call time.
+from .features.archive import (  # noqa: E402,F401
+    ArchiveError,
+    archive_session,
+    find_archived_sessions,
+    restore_session,
 )
 
 # claude-for-web API client + credentials + repo helpers moved to

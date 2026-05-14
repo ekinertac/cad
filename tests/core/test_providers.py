@@ -127,8 +127,6 @@ def snapshot_html(snapshot):
     return snapshot.use_extension(HTMLSnapshotExtension)
 
 
-
-
 class TestResumeWritesCwdFile:
     """When CAD_CWD_FILE is set in the environment, resume_session writes
     the target cwd to that file before exec'ing claude. The shell wrapper

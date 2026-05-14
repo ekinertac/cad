@@ -127,8 +127,6 @@ def snapshot_html(snapshot):
     return snapshot.use_extension(HTMLSnapshotExtension)
 
 
-
-
 class TestAtomicSidecarWrites:
     """save_*_override goes through _atomic_write_json: previous file is
     copied to <path>.bak, new content is staged to <path>.tmp then
@@ -162,8 +160,6 @@ class TestAtomicSidecarWrites:
         ct.save_title_override("claude", "abc", "y")
         tmp = ct._titles_file().with_suffix(".json.tmp")
         assert not tmp.exists()
-
-
 
 
 class TestCwdOverrideSidecar:
@@ -216,8 +212,6 @@ class TestCwdOverrideSidecar:
         projects = ct.find_local_projects(fake_home / ".claude" / "projects")
         assert len(projects) == 1
         assert projects[0]["cwd"] == str(new_cwd.resolve())
-
-
 
 
 class TestTitleOverrideSidecar:

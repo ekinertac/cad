@@ -127,8 +127,6 @@ def snapshot_html(snapshot):
     return snapshot.use_extension(HTMLSnapshotExtension)
 
 
-
-
 class TestShellInit:
     """`cad shell-init <shell>` prints a wrapper function the user evals
     in their rc file. The function calls the underlying binary with

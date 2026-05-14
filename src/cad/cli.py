@@ -33,6 +33,7 @@ def cli():
 # Order matters only for help-text ordering — runtime behaviour is
 # the same regardless. We put `local` first because it's the
 # default (and the most-used) command.
+from .features import archive as _archive_feature  # noqa: E402
 from .features import html as _html_feature  # noqa: E402
 from .features import live as _live_feature  # noqa: E402
 from .features import local as _local_feature  # noqa: E402
@@ -45,6 +46,7 @@ _live_feature.register(cli)
 _shell_init_feature.register(cli)
 _web_feature.register(cli)
 _html_feature.register(cli)
+_archive_feature.register(cli)
 
 
 def main():

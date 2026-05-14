@@ -127,11 +127,6 @@ def snapshot_html(snapshot):
     return snapshot.use_extension(HTMLSnapshotExtension)
 
 
-
-
-
-
-
 class TestWebCommandRepoFiltering:
     """Tests for the web command repo display and filtering."""
 

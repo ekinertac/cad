@@ -127,8 +127,6 @@ def snapshot_html(snapshot):
     return snapshot.use_extension(HTMLSnapshotExtension)
 
 
-
-
 class TestPeekAction:
     """The picker's `p` action runs peek_session and stays in the loop."""
 
@@ -176,6 +174,57 @@ class TestPeekAction:
         assert session_picker_calls[1]["initial_selected"] == 0
 
 
+class TestArchiveAction:
+    """The picker's `d` action moves the session into ~/.cad/archive/
+    and stays in the loop on the same project. Confirm prompt + live
+    refusal guard both belong to the storage layer (tested there);
+    here we just verify the wiring."""
+
+    def test_archive_action_moves_jsonl_then_resumes_picker(
+        self, tmp_path, monkeypatch
+    ):
+        from click.testing import CliRunner
+        from cad import cli
+        import cad as ct
+
+        fake_home, _, jsonl = _set_up_fake_home_with_session(tmp_path, monkeypatch)
+        # Auto-confirm the "Archive this session?" prompt.
+        monkeypatch.setattr(ct, "prompt_confirm", lambda *a, **kw: True)
+
+        archive_calls = []
+        original_archive = ct.archive_session
+
+        def spy_archive(session):
+            archive_calls.append(session["session_id"])
+            return original_archive(session)
+
+        monkeypatch.setattr(ct, "archive_session", spy_archive)
+
+        # Sequence: pick project, archive session, then session list
+        # is empty so the picker bounces back to projects — third call
+        # quits.
+        call_log = []
+
+        def fake_select(entries, actions=None, **kwargs):
+            call_log.append(actions)
+            if len(call_log) == 1:
+                return entries[0], "open"
+            if len(call_log) == 2:
+                return entries[0], "archive"
+            return None
+
+        monkeypatch.setattr(ct, "select_entry", fake_select)
+
+        result = CliRunner().invoke(cli, ["local"])
+        assert result.exit_code == 0, result.output
+        # archive_session ran exactly once with our fixture session id.
+        assert len(archive_calls) == 1
+        # Original JSONL is gone, archived copy exists.
+        assert not jsonl.exists()
+        archive_dir = fake_home / ".cad" / "archive"
+        assert any(archive_dir.glob("*.jsonl"))
+        # The `d` action was advertised on the session picker.
+        assert call_log[1].get("d") == "archive"
 
 
 class TestLocalSessionCLI:

@@ -346,6 +346,7 @@ def local_cmd(
                     "s": "summarize",
                     "m": "move",
                     "p": "peek",
+                    "d": "archive",
                 },
                 back_action="back",
                 initial_selected=selected_idx,
@@ -417,6 +418,37 @@ def local_cmd(
                 load_session_summary(session)
                 verb = "Moved" if new_cwd else "Cleared override for"
                 click.echo(f"{verb} session to {new_cwd or session['cwd']}")
+                continue
+
+            if action == "archive":
+                # Soft-delete: move the JSONL to ~/.cad/archive/. cad
+                # archive can list and restore it; a plain mv works
+                # too. Refuse for live sessions / non-claude providers.
+                archive_session_fn = _lookup("archive_session")
+                ArchiveError = _lookup("ArchiveError")
+                if not prompt_confirm(
+                    f"Archive session {session['session_id']}? "
+                    "(reversible via `cad archive`)"
+                ):
+                    continue
+                try:
+                    dest = archive_session_fn(session)
+                except ArchiveError as e:
+                    click.echo(f"Archive failed: {e}", err=True)
+                    continue
+                click.echo(f"Archived to {dest}")
+                # Drop from the in-memory list so the picker re-renders
+                # without it. If the project is now empty, bounce back
+                # to the project picker.
+                try:
+                    sessions.remove(session)
+                except ValueError:
+                    pass
+                if not sessions:
+                    went_back = True
+                    break
+                # Keep cursor on roughly the same row.
+                selected_idx = min(selected_idx, len(sessions) - 1)
                 continue
 
             if action == "resume":

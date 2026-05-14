@@ -128,8 +128,6 @@ def snapshot_html(snapshot):
     return snapshot.use_extension(HTMLSnapshotExtension)
 
 
-
-
 class TestParseSessionFile:
     """Tests for parse_session_file which abstracts both JSON and JSONL formats."""
 
@@ -189,8 +187,6 @@ class TestParseSessionFile:
         assert index_html == snapshot_html
 
 
-
-
 class TestGetSessionSummary:
     """Tests for get_session_summary which extracts summary from session files."""
 
@@ -224,8 +220,6 @@ class TestGetSessionSummary:
         summary = get_session_summary(jsonl_file, max_length=100)
         assert len(summary) <= 100
         assert summary.endswith("...")
-
-
 
 
 class TestGetSessionCwd:
@@ -264,8 +258,6 @@ class TestGetSessionCwd:
             '{"type":"user","cwd":"/recovered","message":{"content":"hi"}}\n'
         )
         assert get_session_cwd(f) == "/recovered"
-
-
 
 
 class TestClaudeSessionMetadata:
@@ -345,8 +337,6 @@ class TestClaudeSessionMetadata:
         # Old unnamed format: "claude/ <prompt>"
         assert "claude/ prompt" in sess["display"]
         assert "—" not in sess["display"]
-
-
 
 
 class TestGetSessionTranscript:

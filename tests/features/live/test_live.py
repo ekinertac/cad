@@ -127,8 +127,6 @@ def snapshot_html(snapshot):
     return snapshot.use_extension(HTMLSnapshotExtension)
 
 
-
-
 class TestLiveCommand:
     """`cad live` is an interactive picker showing only live sessions,
     auto-refreshing every 2 seconds."""
@@ -472,8 +470,6 @@ class TestLiveCommand:
         assert "No live agent sessions" in result.output
 
 
-
-
 class TestFocusLiveSession:
     """`focus_live_session` switches the terminal to whichever tab is
     running the live claude process. Right now only iTerm2 is supported;
@@ -551,8 +547,6 @@ class TestFocusLiveSession:
 
         monkeypatch.setattr(ct.subprocess, "run", fake_run)
         assert ct.focus_live_session({"pid": 4242}) is False
-
-
 
 
 class TestLiveClaudeDetection:
