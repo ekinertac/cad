@@ -43,6 +43,33 @@ def _lookup(name):
     return cad_ns[name]
 
 
+def _make_deep_search_callback():
+    """Build the callable the inner session picker invokes when the
+    user types ``/?phrase`` and presses Enter. Calls the shared
+    search engine and decorates each hit with a snippet suffix so
+    the picker rows show the matched context inline.
+
+    Looked up through cad.__dict__ so the same monkeypatch surface
+    used for `cad search` covers `/?` too — there is no second code
+    path to test."""
+    search_sessions = _lookup("search_sessions")
+    load_session_summary = _lookup("load_session_summary")
+
+    def _deep_search(query):
+        hits = search_sessions(query)
+        for h in hits:
+            load_session_summary(h)
+            snippet = h.get("snippet", "")
+            matches = h.get("match_count", 1)
+            suffix = f'  → "{snippet}"' if snippet else ""
+            if matches > 1:
+                suffix += f"  [{matches} matches]"
+            h["display"] = h["display"] + suffix
+        return hits
+
+    return _deep_search
+
+
 @click.command("local")
 @click.option(
     "-o",
@@ -350,6 +377,13 @@ def local_cmd(
                 },
                 back_action="back",
                 initial_selected=selected_idx,
+                # /?phrase inside this picker triggers content search
+                # across every local session (not just the ones in
+                # this project — search is global so the user finds
+                # what they're looking for regardless of where they
+                # entered the picker). Hydrating the hits' displays
+                # adds the snippet so the picker rows show context.
+                deep_search_callback=_make_deep_search_callback(),
             )
             if picked is None:
                 # q or Ctrl-C — hard quit.

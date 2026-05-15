@@ -20,13 +20,32 @@ features can call them without crossing the feature boundary into
 """
 
 from .actions import peek_session, summarize_session
+from .resolve import (
+    AmbiguousSessionRef,
+    NoLiveSession,
+    SessionNotFound,
+    resolve_session_id,
+)
 
 
 def register(cli):
-    """Attach `cad local` to the click group."""
+    """Attach `cad local` plus every action-as-command subcommand to
+    the click group. The actions (resume, peek, rename, summarize,
+    move, new, restore) mirror the picker's keyboard shortcuts so
+    they're scriptable from outside cad too."""
     from .command import local_cmd
+    from .commands_action import register_actions
 
     cli.add_command(local_cmd, name="local")
+    register_actions(cli)
 
 
-__all__ = ["peek_session", "register", "summarize_session"]
+__all__ = [
+    "AmbiguousSessionRef",
+    "NoLiveSession",
+    "SessionNotFound",
+    "peek_session",
+    "register",
+    "resolve_session_id",
+    "summarize_session",
+]

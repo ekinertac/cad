@@ -100,7 +100,7 @@ Both pickers support `/` for type-to-filter search.
 | `m` | **Move** to a different project: prompt for a new cwd, validate, save to `~/.cad/cwd-overrides.json`. For sessions that drift across folders. Agent files are never modified. |
 | `p` | **Peek**: opens prompts/assistant replies (no tool noise) in `$PAGER`, scrolled to the most recent turn. Press `q` and you're back on the same row. |
 | `d` | **Archive**: soft-delete. `mv`s the JSONL to `~/.cad/archive/<session-id>.jsonl` after a confirm prompt — gone from cad and from `claude --resume`, recoverable via `cad archive`. Refuses for live sessions and non-claude providers. |
-| `/` | Search-filter mode. Type to narrow, Enter selects, Esc exits search. |
+| `/` | Search-filter mode. Type to narrow titles, Enter selects, Esc exits search. **Type `?phrase`** inside the search box to switch from title-filter to content-search across every local session — Enter swaps the picker contents to the search hits with the matched snippet inline. |
 | `Esc` / `Backspace` | Back to the project picker. |
 | `q` / `Ctrl-C` | Quit. |
 
@@ -133,11 +133,27 @@ cad <subcommand> --help    # for details
 |---|---|
 | `cad` / `cad local` | Project picker → session picker. The default. |
 | `cad live` | Running-process dashboard, described above. |
-| `cad archive` | Browse archived sessions (`d` on the picker put them there). Enter restores to the original `~/.claude/projects/...` location, `p` peeks, `D` permanently deletes. |
+| `cad search <query>` | Find sessions whose conversation text matches `<query>`. `--cwd`, `--provider`, `--limit` flags scope the search. Same engine that powers `/?phrase` inside the picker. |
+| `cad archive [<ref>]` | With `<ref>` archives that session. Without, browses the archive — Enter restores, `p` peeks, `D` permanently deletes. |
 | `cad json <file>` | Render a specific JSONL/JSON file to HTML. Accepts a URL too. |
 | `cad all` | Bulk-render every claude session to a browsable archive. |
 | `cad web [<session-id>]` | Claude-for-web sessions via the API. Currently broken upstream — see [simonw/claude-code-transcripts#77](https://github.com/simonw/claude-code-transcripts/issues/77). |
 | `cad shell-init zsh\|bash` | Print the shell wrapper for post-exit `cd`. |
+
+### Action subcommands
+
+Every picker shortcut is also a one-shot CLI command so the same actions are scriptable / aliasable. They all take a `<ref>` — a full UUID, a unique prefix, `@last` (newest session), or `@live` (the currently-running one). Optional `--cwd` scopes the lookup to one project.
+
+| | |
+|---|---|
+| `cad resume <ref>` | exec `claude --resume`. Replaces the cad process, so use it through the `cad shell-init` wrapper if you want post-exit `cd` to follow. |
+| `cad new [<cwd>]` | exec fresh `claude` in `<cwd>` (default: current dir). |
+| `cad peek <ref>` | Open the session in `$PAGER`, read-only. |
+| `cad rename <ref> <text>` | Set the cad-side title for this session. Empty `<text>` clears the override. |
+| `cad summarize <ref>` | Pipe the session through `codex exec` and save the 3-7-word title it returns. |
+| `cad move <ref> <cwd>` | Move the session to a different cad project. Empty `<cwd>` clears the override. |
+| `cad archive <ref>` | Soft-delete (mv to `~/.cad/archive/`). Refused for live sessions. |
+| `cad restore <ref>` | Inverse: mv from `~/.cad/archive/` back to `~/.claude/projects/...`. |
 
 ## Where things live
 
@@ -166,7 +182,7 @@ Adding terminal integration for `cad live`'s Enter follows a similar shape — s
 ## Development
 
 ```bash
-uv run pytest          # 231 tests
+uv run pytest          # 261 tests
 uv run black .         # format before commit
 uv run cad             # run the dev copy
 ```

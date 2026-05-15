@@ -47,6 +47,7 @@ def select_entry(
     refresh_interval=2.0,
     page_size=18,
     full_screen=False,
+    deep_search_callback=None,
 ):
     """Interactive list picker with per-key actions and modal search.
 
@@ -75,6 +76,13 @@ def select_entry(
     entry dict is passed back to the caller so it can dispatch on whatever
     metadata it included. Returns ``(entry, action_name)`` or ``None`` if
     the user cancelled.
+
+    ``deep_search_callback`` (optional): a function
+    ``(query: str) -> list[entry_dict]`` invoked when the user types
+    ``/?something`` and presses Enter. The returned entries replace
+    the current list in place and the picker keeps running on the
+    hits. Used by ``cad local`` to wire content search behind a
+    keystroke without core/picker importing features/search.
 
     Built directly on prompt_toolkit because questionary's select doesn't
     expose per-key action binding — the alternative would be inconsistent
@@ -221,16 +229,24 @@ def select_entry(
 
     def get_status_text():
         if state["search_mode"]:
-            return [
-                (
-                    "class:status",
-                    f" /{state['filter']}▁  Enter=confirm · Esc=exit search\n",
-                )
-            ]
+            # When a deep-search callback is wired and the filter
+            # starts with `?`, telegraph that Enter does a content
+            # search instead of confirming the title filter.
+            doing_deep_search = deep_search_callback is not None and state[
+                "filter"
+            ].startswith("?")
+            if doing_deep_search:
+                hint = f" /{state['filter']}▁  Enter=search content · Esc=cancel\n"
+            else:
+                hint = f" /{state['filter']}▁  Enter=confirm · Esc=exit search\n"
+            return [("class:status", hint)]
         # Render the hint line from the actions dict so it always reflects
         # the configured keys for this picker.
         parts = [f"{'Enter' if k == 'enter' else k}={v}" for k, v in actions.items()]
-        parts.append("/=search")
+        search_label = (
+            "/=search · /?=content-search" if deep_search_callback else "/=search"
+        )
+        parts.append(search_label)
         if back_action:
             parts += ["Esc/Bksp=back", "q=quit"]
         else:
@@ -285,6 +301,26 @@ def select_entry(
     # them while filtering doesn't accidentally pick.
     def _make_action_handler(action_name):
         def _handler(event):
+            # Deep-search intercept: in search mode, a filter starting
+            # with `?` means "search session content, not titles".
+            # Pressing Enter swaps the entry list to the search hits
+            # and the picker keeps running on them. No-op if the
+            # caller didn't wire a deep_search_callback or the query
+            # is empty (just `?`).
+            if (
+                deep_search_callback is not None
+                and state["search_mode"]
+                and state["filter"].startswith("?")
+            ):
+                query = state["filter"][1:].strip()
+                if query:
+                    hits = deep_search_callback(query)
+                    entries.clear()
+                    entries.extend(hits)
+                    state["filter"] = ""
+                    state["search_mode"] = False
+                    state["selected"] = 0
+                    return
             indices = filtered_indices()
             if not indices:
                 return

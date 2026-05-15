@@ -33,17 +33,56 @@ def _lookup(name):
 
 
 @click.command("archive")
-def archive_cmd():
-    """Browse and restore archived sessions.
+@click.argument("ref", required=False)
+def archive_cmd(ref):
+    """Browse archived sessions, or archive REF directly.
 
-    Sessions move into the archive when you press ``d`` on the regular
-    session picker. They live at ``~/.cad/archive/<session-id>.jsonl``
-    until you either restore them (Enter), permanently delete them
-    (``D``), or ``mv`` them somewhere else by hand.
+    With no REF, opens the archive picker — sessions that ``d`` on
+    the regular picker put into ``~/.cad/archive/``. Enter restores
+    one back to its original ``~/.claude/projects/<encoded-cwd>/``
+    location, ``p`` peeks, ``D`` permanently deletes after a confirm
+    prompt.
 
-    The archive is intentionally a flat directory so a plain
-    ``ls ~/.cad/archive/`` shows you everything cad has on hand.
+    With REF, archives that session immediately. REF accepts a full
+    UUID, a unique prefix, ``@last`` or ``@live`` — same resolver
+    every other ``cad <action> <ref>`` command uses. Live sessions
+    are refused because archiving a file claude has open would race
+    its writes.
+
+    The archive is intentionally a flat directory: a plain
+    ``ls ~/.cad/archive/`` shows everything cad has on hand.
     """
+    if ref is not None:
+        _archive_one(ref)
+        return
+    _picker_mode()
+
+
+def _archive_one(ref):
+    """``cad archive <ref>``: resolve, archive, exit. Friendly error
+    on the usual resolution failures."""
+    from ..local.resolve import (
+        AmbiguousSessionRef,
+        NoLiveSession,
+        SessionNotFound,
+        resolve_session_id,
+    )
+    from .store import ArchiveError, archive_session
+
+    try:
+        session = resolve_session_id(ref)
+    except (SessionNotFound, AmbiguousSessionRef, NoLiveSession) as e:
+        raise click.ClickException(str(e))
+    try:
+        dest = archive_session(session)
+    except ArchiveError as e:
+        raise click.ClickException(str(e))
+    click.echo(f"Archived {session['session_id']} → {dest}")
+
+
+def _picker_mode():
+    """``cad archive`` (no arg): the original picker over the archive
+    directory, with restore / peek / delete actions."""
     find_archived_sessions = _lookup("find_archived_sessions")
     restore_session = _lookup("restore_session")
     select_entry = _lookup("select_entry")

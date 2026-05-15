@@ -95,7 +95,11 @@ def _make_mock_select_entry(returns):
     """
     queue = list(returns)
 
-    def fake(entries, actions=None, back_action=None, initial_selected=0):
+    def fake(entries, actions=None, back_action=None, initial_selected=0, **_kw):
+        # Tolerate any future select_entry kwargs (refresh_callback,
+        # page_size, full_screen, deep_search_callback, …) so test
+        # mocks don't need touching every time the picker grows
+        # a new option.
         if not queue:
             raise AssertionError("select_entry called more times than scripted")
         v = queue.pop(0)

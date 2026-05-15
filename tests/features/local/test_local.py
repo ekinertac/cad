@@ -142,7 +142,7 @@ class TestPeekAction:
         call_log = []
 
         def fake_select_entry(
-            entries, actions=None, back_action=None, initial_selected=0
+            entries, actions=None, back_action=None, initial_selected=0, **_kw
         ):
             call_log.append(
                 {
@@ -421,7 +421,7 @@ class TestLocalSessionCLI:
         captured = {}
 
         def fake_select_entry(
-            entries, actions=None, back_action=None, initial_selected=0
+            entries, actions=None, back_action=None, initial_selected=0, **_kw
         ):
             call_count["n"] += 1
             if call_count["n"] == 1:
@@ -451,7 +451,7 @@ class TestLocalSessionCLI:
         _, real_cwd, _ = _set_up_fake_home_with_session(tmp_path, monkeypatch)
 
         def fake_select_entry(
-            entries, actions=None, back_action=None, initial_selected=0
+            entries, actions=None, back_action=None, initial_selected=0, **_kw
         ):
             return entries[0], "new"
 
@@ -490,7 +490,7 @@ class TestLocalSessionCLI:
         call_log = []
 
         def fake_select_entry(
-            entries, actions=None, back_action=None, initial_selected=0
+            entries, actions=None, back_action=None, initial_selected=0, **_kw
         ):
             call_log.append(
                 {
@@ -524,7 +524,7 @@ class TestLocalSessionCLI:
         call_count = {"n": 0}
 
         def fake_select_entry(
-            entries, actions=None, back_action=None, initial_selected=0
+            entries, actions=None, back_action=None, initial_selected=0, **_kw
         ):
             call_count["n"] += 1
             # 1: project picker → open first; 2: session picker → back;
@@ -577,7 +577,7 @@ class TestLocalSessionCLI:
         call_count = {"n": 0}
 
         def fake_select_entry(
-            entries, actions=None, back_action=None, initial_selected=0
+            entries, actions=None, back_action=None, initial_selected=0, **_kw
         ):
             call_count["n"] += 1
             if call_count["n"] == 1:
@@ -645,7 +645,7 @@ class TestLocalSessionCLI:
         call_count = {"n": 0}
 
         def fake_select_entry(
-            entries, actions=None, back_action=None, initial_selected=0
+            entries, actions=None, back_action=None, initial_selected=0, **_kw
         ):
             call_count["n"] += 1
             if call_count["n"] == 1:
@@ -682,7 +682,7 @@ class TestLocalSessionCLI:
         call_count = {"n": 0}
 
         def fake_select_entry(
-            entries, actions=None, back_action=None, initial_selected=0
+            entries, actions=None, back_action=None, initial_selected=0, **_kw
         ):
             call_count["n"] += 1
             if call_count["n"] == 1:
@@ -742,7 +742,7 @@ class TestLocalSessionCLI:
         call_log = []
 
         def fake_select_entry(
-            entries, actions=None, back_action=None, initial_selected=0
+            entries, actions=None, back_action=None, initial_selected=0, **_kw
         ):
             call_log.append({"actions": actions, "n_entries": len(entries)})
             return entries[0], list(actions.keys())[0] if actions else "select"

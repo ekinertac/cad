@@ -207,6 +207,11 @@ from .features.archive import (  # noqa: E402,F401
     restore_session,
 )
 
+# Search engine. Re-exported so the upcoming /?phrase deep-search hook
+# in core/picker.py can find it via cad.__dict__ without core
+# importing features/.
+from .features.search import search_sessions  # noqa: E402,F401
+
 # claude-for-web API client + credentials + repo helpers moved to
 # features/web/. Re-exported so the existing test imports continue
 # to resolve at `from cad import resolve_credentials` etc.
