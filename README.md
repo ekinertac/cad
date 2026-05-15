@@ -137,7 +137,6 @@ cad <subcommand> --help    # for details
 | `cad archive [<ref>]` | With `<ref>` archives that session. Without, browses the archive — Enter restores, `p` peeks, `D` permanently deletes. |
 | `cad json <file>` | Render a specific JSONL/JSON file to HTML. Accepts a URL too. |
 | `cad all` | Bulk-render every claude session to a browsable archive. |
-| `cad web [<session-id>]` | Claude-for-web sessions via the API. Currently broken upstream — see [simonw/claude-code-transcripts#77](https://github.com/simonw/claude-code-transcripts/issues/77). |
 | `cad shell-init zsh\|bash` | Print the shell wrapper for post-exit `cd`. |
 
 ### Action subcommands
@@ -182,7 +181,7 @@ Adding terminal integration for `cad live`'s Enter follows a similar shape — s
 ## Development
 
 ```bash
-uv run pytest          # 261 tests
+uv run pytest          # 247 tests
 uv run black .         # format before commit
 uv run cad             # run the dev copy
 ```

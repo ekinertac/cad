@@ -39,13 +39,11 @@ from .features import live as _live_feature  # noqa: E402
 from .features import local as _local_feature  # noqa: E402
 from .features import search as _search_feature  # noqa: E402
 from .features import shell_init as _shell_init_feature  # noqa: E402
-from .features import web as _web_feature  # noqa: E402
 
 
 _local_feature.register(cli)
 _live_feature.register(cli)
 _shell_init_feature.register(cli)
-_web_feature.register(cli)
 _html_feature.register(cli)
 _archive_feature.register(cli)
 _search_feature.register(cli)

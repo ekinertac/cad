@@ -10,9 +10,11 @@ claude session into a browsable HTML site lives here:
   render_*_tool helpers, render_markdown_text, format_json).
 - Conversation analysis (analyze_conversation, format_tool_stats,
   detect_github_repo).
-- The two main entry points: generate_html (for a JSONL/JSON file)
-  and generate_html_from_session_data (for an API-shape dict from
-  cad web).
+- The main entry point: generate_html (for a JSONL/JSON file).
+  ``generate_html_from_session_data`` (API-shape dict variant) is
+  still here as a vestigial sibling — it used to power ``cad web``,
+  which has been deleted; the function survives in case a future
+  feature needs the same shape.
 - Batch rendering (generate_batch_html plus project / master
   indices) for `cad all`.
 - Gist upload (inject_gist_preview_js + create_gist) for `--gist`.
@@ -25,9 +27,7 @@ A module-level ``_github_repo`` variable is mutated by
 generate_html / generate_html_from_session_data and read by the
 render helpers — that's why everything lives in one module.
 
-May import from: core/, features/web (for the API-shape session
-dict consumed by generate_html_from_session_data — though we keep
-that import lazy to avoid a feature-to-feature dep at module load).
+May import from: core/. Self-contained otherwise.
 """
 
 import html

@@ -80,17 +80,6 @@ from cad import (
     is_url,
     fetch_url_to_tempfile,
     GIST_PREVIEW_JS,
-    # features/web
-    resolve_credentials,
-    fetch_sessions,
-    fetch_session,
-    enrich_sessions_with_repos,
-    filter_sessions_by_repo,
-    extract_repo_from_session,
-    format_session_for_display,
-    get_access_token_from_keychain,
-    get_org_uuid_from_config,
-    CredentialsError,
     # features/local
     peek_session,
     summarize_session,

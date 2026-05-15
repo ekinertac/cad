@@ -46,10 +46,6 @@ from .core.session_model import (  # noqa: E402,F401
     parse_session_file,
 )
 
-# API constants
-API_BASE_URL = "https://api.anthropic.com/v1"
-ANTHROPIC_VERSION = "2023-06-01"
-
 # Picker + prompts moved to core/picker.py.
 from .core.picker import (  # noqa: E402,F401
     prompt_confirm,
@@ -211,29 +207,6 @@ from .features.archive import (  # noqa: E402,F401
 # in core/picker.py can find it via cad.__dict__ without core
 # importing features/.
 from .features.search import search_sessions  # noqa: E402,F401
-
-# claude-for-web API client + credentials + repo helpers moved to
-# features/web/. Re-exported so the existing test imports continue
-# to resolve at `from cad import resolve_credentials` etc.
-from .features.web import (  # noqa: E402,F401
-    ANTHROPIC_VERSION,
-    API_BASE_URL,
-    CredentialsError,
-    enrich_sessions_with_repos,
-    extract_repo_from_session,
-    fetch_session,
-    fetch_sessions,
-    filter_sessions_by_repo,
-    format_session_for_display,
-    get_access_token_from_keychain,
-    get_api_headers,
-    get_org_uuid_from_config,
-    resolve_credentials,
-)
-
-# detect_github_repo (used by the HTML render path on local sessions)
-# is conceptually web/HTML but currently still consumed by code
-# remaining in this file. Stays here until features/html is extracted.
 
 # Local actions (peek + summarize) live in features/local/. Re-exported
 # at the cad top level because features/live and the existing tests

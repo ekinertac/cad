@@ -80,17 +80,6 @@ from cad import (
     is_url,
     fetch_url_to_tempfile,
     GIST_PREVIEW_JS,
-    # features/web
-    resolve_credentials,
-    fetch_sessions,
-    fetch_session,
-    enrich_sessions_with_repos,
-    filter_sessions_by_repo,
-    extract_repo_from_session,
-    format_session_for_display,
-    get_access_token_from_keychain,
-    get_org_uuid_from_config,
-    CredentialsError,
     # features/local
     peek_session,
     summarize_session,
@@ -114,19 +103,16 @@ from tests._helpers import (
     _set_up_fake_home_with_session,
 )
 
-
 class HTMLSnapshotExtension(SingleFileSnapshotExtension):
     """Snapshot extension that saves HTML files."""
 
     _write_mode = WriteMode.TEXT
     file_extension = "html"
 
-
 @pytest.fixture
 def snapshot_html(snapshot):
     """Fixture for HTML file snapshots."""
     return snapshot.use_extension(HTMLSnapshotExtension)
-
 
 class TestGenerateHtml:
     """Tests for the main generate_html function."""
@@ -186,7 +172,6 @@ class TestGenerateHtml:
         assert "0 prompts" not in index_html
         # The page file should exist
         assert (output_dir / "page-001.html").exists()
-
 
 class TestRenderFunctions:
     """Tests for individual render functions."""
@@ -273,7 +258,6 @@ class TestRenderFunctions:
         }
         result = render_bash_tool(tool_input, "tool-123")
         assert result == snapshot_html
-
 
 class TestRenderContentBlock:
     """Tests for render_content_block function."""
@@ -438,7 +422,6 @@ class TestRenderContentBlock:
 
         assert result == snapshot_html
 
-
 class TestAnalyzeConversation:
     """Tests for conversation analysis."""
 
@@ -501,7 +484,6 @@ class TestAnalyzeConversation:
         assert result["commits"][0][0] == "abc1234"
         assert "Add new feature" in result["commits"][0][1]
 
-
 class TestFormatToolStats:
     """Tests for tool stats formatting."""
 
@@ -516,7 +498,6 @@ class TestFormatToolStats:
     def test_empty_counts(self):
         """Test empty tool counts."""
         assert format_tool_stats({}) == ""
-
 
 class TestIsToolResultMessage:
     """Tests for tool result message detection."""
@@ -540,7 +521,6 @@ class TestIsToolResultMessage:
         """Test rejection of empty content."""
         assert is_tool_result_message({"content": []}) is False
         assert is_tool_result_message({"content": "string"}) is False
-
 
 class TestInjectGistPreviewJs:
     """Tests for the inject_gist_preview_js function."""
@@ -639,7 +619,6 @@ class TestInjectGistPreviewJs:
         # The JS should listen for DOMContentLoaded
         assert "DOMContentLoaded" in GIST_PREVIEW_JS
 
-
 class TestCreateGist:
     """Tests for the create_gist function."""
 
@@ -729,7 +708,6 @@ class TestCreateGist:
 
         assert "gh CLI not found" in str(exc_info.value)
 
-
 class TestSessionGistOption:
     """Tests for the session command --gist option."""
 
@@ -801,7 +779,6 @@ class TestSessionGistOption:
         # Verify JS was injected (checks for both domains for backwards compatibility)
         index_content = (output_dir / "index.html").read_text(encoding="utf-8")
         assert "gisthost.github.io" in index_content
-
 
 class TestContinuationLongTexts:
     """Tests for long text extraction from continuation conversations."""
@@ -903,7 +880,6 @@ class TestContinuationLongTexts:
         ), "Long text from continuation conversation should appear in index"
         assert "Redis JavaScript Module" in index_html
 
-
 class TestSessionJsonOption:
     """Tests for the session command --json option."""
 
@@ -944,108 +920,6 @@ class TestSessionJsonOption:
         assert (output_dir / "sample_session.json").exists()
         assert not (output_dir / "session.json").exists()
 
-
-class TestImportJsonOption:
-    """Tests for the import command --json option."""
-
-    def test_import_json_saves_session_data(self, httpx_mock, output_dir):
-        """Test that import --json saves the session JSON."""
-        from click.testing import CliRunner
-        from cad import cli
-
-        # Load sample session to mock API response
-        fixture_path = FIXTURE_DIR / "sample_session.json"
-        with open(fixture_path) as f:
-            session_data = json.load(f)
-
-        httpx_mock.add_response(
-            url="https://api.anthropic.com/v1/session_ingress/session/test-session-id",
-            json=session_data,
-        )
-
-        runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "web",
-                "test-session-id",
-                "--token",
-                "test-token",
-                "--org-uuid",
-                "test-org",
-                "-o",
-                str(output_dir),
-                "--json",
-            ],
-        )
-
-        assert result.exit_code == 0
-        json_file = output_dir / "test-session-id.json"
-        assert json_file.exists()
-        assert "JSON:" in result.output
-        assert "KB" in result.output
-
-        # Verify JSON content is valid
-        with open(json_file) as f:
-            saved_data = json.load(f)
-        assert saved_data == session_data
-
-
-class TestImportGistOption:
-    """Tests for the import command --gist option."""
-
-    def test_import_gist_creates_gist(self, httpx_mock, monkeypatch, tmp_path):
-        """Test that import --gist creates a gist."""
-        from click.testing import CliRunner
-        from cad import cli
-        import subprocess
-
-        # Load sample session to mock API response
-        fixture_path = FIXTURE_DIR / "sample_session.json"
-        with open(fixture_path) as f:
-            session_data = json.load(f)
-
-        httpx_mock.add_response(
-            url="https://api.anthropic.com/v1/session_ingress/session/test-session-id",
-            json=session_data,
-        )
-
-        # Mock subprocess.run for gh gist create
-        mock_result = subprocess.CompletedProcess(
-            args=["gh", "gist", "create"],
-            returncode=0,
-            stdout="https://gist.github.com/testuser/def456\n",
-            stderr="",
-        )
-
-        def mock_run(*args, **kwargs):
-            return mock_result
-
-        monkeypatch.setattr(subprocess, "run", mock_run)
-
-        # Mock tempfile.gettempdir
-        monkeypatch.setattr("cad.tempfile.gettempdir", lambda: str(tmp_path))
-
-        runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "web",
-                "test-session-id",
-                "--token",
-                "test-token",
-                "--org-uuid",
-                "test-org",
-                "--gist",
-            ],
-        )
-
-        assert result.exit_code == 0
-        assert "Creating GitHub gist" in result.output
-        assert "gist.github.com" in result.output
-        assert "gisthost.github.io" in result.output
-
-
 class TestOpenOption:
     """Tests for the --open option."""
 
@@ -1069,51 +943,6 @@ class TestOpenOption:
         result = runner.invoke(
             cli,
             ["json", str(fixture_path), "-o", str(output_dir), "--open"],
-        )
-
-        assert result.exit_code == 0
-        assert len(opened_urls) == 1
-        assert "index.html" in opened_urls[0]
-        assert opened_urls[0].startswith("file://")
-
-    def test_import_open_calls_webbrowser(self, httpx_mock, output_dir, monkeypatch):
-        """Test that import --open opens the browser."""
-        from click.testing import CliRunner
-        from cad import cli
-
-        # Load sample session to mock API response
-        fixture_path = FIXTURE_DIR / "sample_session.json"
-        with open(fixture_path) as f:
-            session_data = json.load(f)
-
-        httpx_mock.add_response(
-            url="https://api.anthropic.com/v1/session_ingress/session/test-session-id",
-            json=session_data,
-        )
-
-        # Track webbrowser.open calls
-        opened_urls = []
-
-        def mock_open(url):
-            opened_urls.append(url)
-            return True
-
-        monkeypatch.setattr("cad.webbrowser.open", mock_open)
-
-        runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "web",
-                "test-session-id",
-                "--token",
-                "test-token",
-                "--org-uuid",
-                "test-org",
-                "-o",
-                str(output_dir),
-                "--open",
-            ],
         )
 
         assert result.exit_code == 0
@@ -1228,43 +1057,6 @@ class TestOutputAutoOption:
         assert expected_dir.exists()
         assert (expected_dir / "index.html").exists()
 
-    def test_web_output_auto_creates_subdirectory(self, httpx_mock, tmp_path):
-        """Test that web -a creates output subdirectory named after session ID."""
-        from click.testing import CliRunner
-        from cad import cli
-
-        # Load sample session to mock API response
-        fixture_path = FIXTURE_DIR / "sample_session.json"
-        with open(fixture_path) as f:
-            session_data = json.load(f)
-
-        httpx_mock.add_response(
-            url="https://api.anthropic.com/v1/session_ingress/session/my-web-session-id",
-            json=session_data,
-        )
-
-        runner = CliRunner()
-        result = runner.invoke(
-            cli,
-            [
-                "web",
-                "my-web-session-id",
-                "--token",
-                "test-token",
-                "--org-uuid",
-                "test-org",
-                "-a",
-                "-o",
-                str(tmp_path),
-            ],
-        )
-
-        assert result.exit_code == 0
-        # Output should be in tmp_path/my-web-session-id/
-        expected_dir = tmp_path / "my-web-session-id"
-        assert expected_dir.exists()
-        assert (expected_dir / "index.html").exists()
-
     def test_output_auto_with_jsonl_uses_stem(self, tmp_path, monkeypatch):
         """Test that -a with JSONL file uses file stem (without .jsonl extension)."""
         from click.testing import CliRunner
@@ -1286,7 +1078,6 @@ class TestOutputAutoOption:
         expected_dir = tmp_path / "sample_session"
         assert expected_dir.exists()
         assert (expected_dir / "index.html").exists()
-
 
 class TestSearchFeature:
     """Tests for the search feature on index.html pages."""
@@ -1365,7 +1156,6 @@ class TestSearchFeature:
 
         # Total pages should be embedded for JS to know how many pages to fetch
         assert "totalPages" in index_html or "total_pages" in index_html
-
 
 class TestGenerateBatchHtml:
     """Tests for generate_batch_html function."""
@@ -1505,7 +1295,6 @@ class TestGenerateBatchHtml:
             assert "session1" in stats["failed_sessions"][0]["session"]
             assert "Simulated failure" in stats["failed_sessions"][0]["error"]
 
-
 class TestAllCommand:
     """Tests for the all CLI command."""
 
@@ -1620,7 +1409,6 @@ class TestAllCommand:
         assert "project-a" not in result.output
         # Should not create any files
         assert not (output_dir / "index.html").exists()
-
 
 class TestJsonCommandWithUrl:
     """Tests for the json command with URL support."""
